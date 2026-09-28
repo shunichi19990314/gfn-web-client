@@ -495,8 +495,8 @@ export function upstreamErrorHandler(error, request, reply) {
           : error.code === 'session_error'
             ? 502
             : 502;
-    request.log.warn({ code: error.code, message: error.message }, 'upstream error');
-    return reply.code(status).send({ error: error.code, message: error.message });
+    request.log.warn({ code: error.code, kind: error.kind, message: error.message }, 'upstream error');
+    return reply.code(status).send({ error: error.code, kind: error.kind ?? undefined, message: error.message });
   }
   if (error?.statusCode === 429) {
     return reply.code(429).send({ error: 'rate_limited', message: error.message });

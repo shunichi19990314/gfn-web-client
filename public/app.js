@@ -359,6 +359,26 @@ async function loadLibraryPage({ reset = false } = {}) {
   }
 }
 
+function parseEndTime(value) {
+  if (value === null || value === undefined) return null;
+  let date = null;
+  if (typeof value === 'number') date = new Date(value > 1e12 ? value : value * 1000);
+  else if (typeof value === 'string' && /^\d+$/.test(value)) {
+    const n = Number(value);
+    date = new Date(n > 1e12 ? n : n * 1000);
+  } else if (typeof value === 'string') {
+    date = new Date(value);
+  }
+  if (!date || Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function formatUpdateHint(game) {
+  const end = parseEndTime(game.updateEndTime);
+  if (game.inMaintenance) return end ? `メンテナンス(〜${end}頃)` : 'メンテナンス中';
+  return end ? `更新中(〜${end}頃)` : 'サーバー更新中';
+}
+
 function renderGames() {
   const grid = $('game-grid');
   const template = $('game-card-template');
@@ -396,14 +416,30 @@ function renderGames() {
       badge.textContent = `最終プレイ: ${String(game.lastPlayed).slice(0, 10)}`;
       badges.appendChild(badge);
     }
+    if (game.patchLevel === 'auto' || game.inMaintenance) {
+      const badge = document.createElement('span');
+      badge.className = 'warning';
+      badge.textContent = game.inMaintenance ? 'メンテナンス中' : 'サーバー更新中';
+      badges.appendChild(badge);
+    } else if (game.patchLevel === 'manual') {
+      const badge = document.createElement('span');
+      badge.className = 'warning';
+      badge.textContent = '手動更新待ち';
+      badges.appendChild(badge);
+    }
     const launchBtn = node.querySelector('.launch-btn');
-    if (game.launchAppId) {
+    const blocked = game.patchLevel === 'auto' || game.inMaintenance;
+    if (game.launchAppId && !blocked) {
       node.querySelector('.launch-id').textContent = `appId ${game.launchAppId}`;
       launchBtn.addEventListener('click', () => openLaunchModal(game));
     } else {
-      node.querySelector('.launch-id').textContent = 'launch id なし';
+      node.querySelector('.launch-id').textContent = blocked
+        ? formatUpdateHint(game)
+        : 'launch id なし';
       launchBtn.disabled = true;
-      launchBtn.title = '数値のlaunchAppIdがないため起動できません';
+      launchBtn.title = blocked
+        ? 'NVIDIAサーバー側でこのゲームを更新中です。通常は数時間で再開されます'
+        : '数値のlaunchAppIdがないため起動できません';
     }
     fragment.appendChild(node);
   }
@@ -486,7 +522,22 @@ async function launchGame() {
       await handleSessionConflict(error);
       return;
     }
+    const kind = error.payload?.kind;
     setStreamStatus('セッション作成に失敗', error.message);
+    // 再試行が有効なエラー(更新中/混雑系)はリトライボタンを提供
+    const retryable = ['app_patching', 'app_maintenance', 'capacity', 'queue_full', 'unavailable', 'forwarding'].includes(kind);
+    if (retryable) {
+      const btn = $('stream-cancel-btn');
+      btn.textContent = kind === 'app_patching' ? '60秒後に再試行' : '再試行';
+      btn.disabled = false;
+      btn.onclick = async () => {
+        btn.disabled = true;
+        btn.textContent = 'キャンセル';
+        btn.onclick = null;
+        if (kind === 'app_patching') await new Promise((resolve) => setTimeout(resolve, 60_000));
+        await launchGame();
+      };
+    }
     return;
   }
   state.stream = { gfnStream: null, signaling: null, pollTimer: null, sessionInfo: info, startedAt: Date.now() };

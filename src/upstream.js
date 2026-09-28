@@ -3,14 +3,16 @@ import { UPSTREAM_TIMEOUT_MS } from './config.js';
 
 export class UpstreamError extends Error {
   /**
-   * @param {'network_error'|'upstream_error'|'invalid_params'|'authentication_required'|'graphql_error'} code
+   * @param {'network_error'|'upstream_error'|'invalid_params'|'authentication_required'|'graphql_error'|'session_error'} code
+   * @param {object} [extra] { status, payload, kind }
    */
-  constructor(code, message, { status, payload } = {}) {
+  constructor(code, message, { status, payload, kind } = {}) {
     super(message);
     this.name = 'UpstreamError';
     this.code = code;
     this.status = status;
     this.payload = payload;
+    this.kind = kind ?? null; // 機械可読なエラー種別(例: 'app_patching')
   }
 }
 

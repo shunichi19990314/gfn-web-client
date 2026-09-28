@@ -368,6 +368,62 @@ function acceptedHdrMode(session) {
 
 // ---------- レスポンス検証 ----------
 
+/**
+ * 既知のCloudMatchセッションエラー(statusCode → 意味)
+ * 出典: OpenNOW v0.5.5 gfnErrorCodeEnum.ts(statusCode定義)+ gfnErrorMessages.ts(公式メッセージ)
+ */
+const SESSION_ERROR_BY_STATUS = new Map([
+  [13, ['time_exceeded', 'セッションの権利時間(allotted time)を超過しました']],
+  [19, ['invalid_app', 'このゲームは現在利用できません(appIdが無効/提供終了)']],
+  [20, ['invalid_app', 'このゲームは現在利用できません(appIdが見つかりません)']],
+  [23, ['eula', 'このゲームのEULA(使用許諾)への同意が必要です。公式クライアント/サイトで一度同意してください']],
+  [24, ['maintenance', 'GeForce NOWサービスはメンテナンス中です']],
+  [25, ['unavailable', 'サービスが一時的に利用できません']],
+  [26, ['steam_login', 'Steam Guard認証が必要です。公式クライアントで一度ログインし直してください']],
+  [27, ['steam_login', 'Steamログインが必要です。アカウント連携を確認してください']],
+  [28, ['steam_login', 'Steam Guardコードが無効でした。公式クライアントでログインし直してください']],
+  [41, ['app_patching', 'このゲームはNVIDIAサーバー側で更新(パッチ適用)中です。通常は数時間以内に再開されます。別のタイトルでお試しください']],
+  [42, ['game_not_found', 'ゲームが見つかりません']],
+  [49, ['session_expired', 'セッションの有効期限が切れました']],
+  [51, ['capacity', '転送ゾーンが混雑しています(ForwardingZoneOutOfCapacity)']],
+  [54, ['region_hold', 'このリージョンは無料枠を一時的に制限しています']],
+  [55, ['region_hold', 'このリージョンは有料枠を一時的に制限しています']],
+  [56, ['app_maintenance', 'このゲームはメンテナンス中です']],
+  [58, ['capacity', 'サーバー容量が不足しています(混雑)。時間をおいて再試行してください']],
+  [62, ['queue_full', '待機行列が上限に達しています。時間をおいて再試行してください']],
+  [85, ['capacity', '容量不足のためセッションが拒否されました(SessionRejectedNoCapacity)']],
+  [91, ['not_allowed', 'このゲームはストリーミングが許可されていません']],
+]);
+
+/** statusDescription 文字列からの種別推定(statusCodeが返らない場合のフォールバック) */
+const SESSION_ERROR_BY_DESCRIPTION = [
+  [/APP_PATCHING|PATCHING_STATUS/i, 'app_patching', 'このゲームはNVIDIAサーバー側で更新(パッチ適用)中です。通常は数時間以内に再開されます。別のタイトルでお試しください'],
+  [/APP_MAINTENANCE/i, 'app_maintenance', 'このゲームはメンテナンス中です'],
+  [/MAINTENANCE/i, 'maintenance', 'サービスはメンテナンス中です'],
+  [/STEAM_GUARD/i, 'steam_login', 'Steam Guard認証が必要です'],
+  [/STEAM_LOGIN/i, 'steam_login', 'Steamログインが必要です'],
+  [/EULA/i, 'eula', 'EULAへの同意が必要です'],
+  [/QUEUE_LENGTH_EXCEEDED/i, 'queue_full', '待機行列が上限に達しています'],
+  [/CAPACITY/i, 'capacity', 'サーバーが混雑しています'],
+];
+
+/**
+ * CloudMatchエラーの機械可読種別+日本語メッセージを解決する
+ * @returns {{kind: string, messageJa: string}|null}
+ */
+export function describeSessionError({ statusCode = null, description = '', unifiedErrorCode = null } = {}) {
+  const code = valueI64(statusCode);
+  if (code !== null && SESSION_ERROR_BY_STATUS.has(code)) {
+    const [kind, messageJa] = SESSION_ERROR_BY_STATUS.get(code);
+    return { kind, messageJa };
+  }
+  const text = `${description ?? ''} ${unifiedErrorCode ?? ''}`;
+  for (const [pattern, kind, messageJa] of SESSION_ERROR_BY_DESCRIPTION) {
+    if (pattern.test(text)) return { kind, messageJa };
+  }
+  return null;
+}
+
 /** cloudmatch.rs:1290-1332 validate_cloudmatch_response */
 function validateCloudmatchResponse(context, status, payload, { allowNotPaused = false } = {}) {
   const requestStatus = payload?.requestStatus;
@@ -379,18 +435,31 @@ function validateCloudmatchResponse(context, status, payload, { allowNotPaused =
   ) {
     return payload;
   }
+  const known = describeSessionError({
+    statusCode: requestStatus?.statusCode ?? null,
+    description: requestStatus?.statusDescription ?? '',
+    unifiedErrorCode: requestStatus?.unifiedErrorCode ?? payload?.session?.errorCode ?? null,
+  });
   if (status < 200 || status >= 300) {
     const description = requestStatus?.statusDescription ?? payload?.message ?? payload?.error;
+    const message = known
+      ? known.messageJa
+      : `${context} (${status})${description ? `: ${description}` : ''}`;
     throw new UpstreamError(
       status === 401 || status === 403 ? 'authentication_required' : 'session_error',
-      `${context} (${status})${description ? `: ${description}` : ''}`,
-      { status, payload },
+      message,
+      { status, payload, kind: known?.kind ?? null },
     );
   }
   if (valueI64(requestStatus?.statusCode) !== 1) {
     const description = requestStatus?.statusDescription ?? 'CloudMatch rejected the request';
     const code = valueI64(requestStatus?.unifiedErrorCode) ?? valueI64(payload?.session?.errorCode);
-    throw new UpstreamError('session_error', code !== null ? `${description} (${code})` : description, { payload });
+    const message = known
+      ? known.messageJa
+      : code !== null
+        ? `${description} (${code})`
+        : description;
+    throw new UpstreamError('session_error', message, { payload, kind: known?.kind ?? null });
   }
   return payload;
 }

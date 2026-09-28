@@ -29,7 +29,7 @@ import {
   steamDeckAuthHeaders,
   userInfoHeaders,
 } from './headers.js';
-import { LIBRARY_QUERY } from './queries.js';
+import { LIBRARY_QUERY, LIBRARY_QUERY_V2 } from './queries.js';
 import { UpstreamError, assertOk, fetchJson } from './upstream.js';
 
 // ---------- 基本ユーティリティ ----------
@@ -392,6 +392,23 @@ export function appToGame(app) {
     .map((variant) => {
       if (typeof variant?.id !== 'string') return null;
       const libraryStatus = variant.gfn?.library?.status ?? null;
+      // stateDetails: AutoPatching/ManualPatching/Maintenance メタデータ(lcarsGraphql.ts:84-95由来)
+      const stateDetails = Array.isArray(variant.gfn?.stateDetails) ? variant.gfn.stateDetails : [];
+      let patching = null;
+      let patchEndTime = null;
+      let maintenance = false;
+      for (const detail of stateDetails) {
+        const typename = String(detail?.__typename ?? '');
+        if (typename.includes('AutoPatching')) {
+          patching = 'auto';
+          patchEndTime = detail?.endTime ?? patchEndTime;
+        } else if (typename.includes('ManualPatching')) {
+          patching = patching ?? 'manual';
+          patchEndTime = detail?.endTime ?? patchEndTime;
+        } else if (typename.includes('Maintenance')) {
+          maintenance = true;
+        }
+      }
       return {
         id: variant.id,
         store: variant.appStore ?? 'Unknown',
@@ -400,8 +417,12 @@ export function appToGame(app) {
         librarySelected: variant.gfn?.library?.selected === true,
         inLibrary: ['MANUAL', 'PLATFORM_SYNC', 'IN_LIBRARY'].includes(libraryStatus),
         libraryStatus,
+        playStatus: variant.gfn?.library?.playStatus ?? null,
         lastPlayedDate: variant.gfn?.library?.lastPlayedDate ?? null,
         gfnStatus: variant.gfn?.status ?? null,
+        patching,
+        patchEndTime,
+        maintenance,
         supportsInGameSettingsPersistence: gfnFeatureEnabled(variant.gfn?.features, 'IN_GAME_SETTINGS_PERSISTENCE_ENABLED'),
       };
     })
@@ -426,6 +447,15 @@ export function appToGame(app) {
   const availableStores = variants.map((v) => v.store);
   const screenshots = imageValues(images.SCREENSHOTS, 1200);
 
+  const isUpdating = variants.some((v) => v.patching === 'auto' || v.patching === 'manual');
+  const patchLevel = variants.some((v) => v.patching === 'auto')
+    ? 'auto'
+    : variants.some((v) => v.patching === 'manual')
+      ? 'manual'
+      : null;
+  const updateEndTime = variants.map((v) => v.patchEndTime).find((v) => v !== null && v !== undefined) ?? null;
+  const inMaintenance = variants.some((v) => v.maintenance);
+
   return {
     id,
     uuid: id,
@@ -447,6 +477,10 @@ export function appToGame(app) {
     searchText: [title, publisher, developer, ...availableStores, ...genres].filter(Boolean).join(' ').toLowerCase(),
     lastPlayed: variants.map((v) => v.lastPlayedDate).find((v) => v !== null && v !== undefined) ?? null,
     isInLibrary: variants.some((v) => v.inLibrary),
+    isUpdating,
+    patchLevel,
+    updateEndTime,
+    inMaintenance,
     selectedVariantIndex: selectedIndex,
     variants,
   };
@@ -460,6 +494,7 @@ function graphqlErrorMessage(payload) {
 
 /**
  * ライブラリ1ページ取得(gfn.rs:1147-1235)
+ * stateDetails付きV2クエリを試し、GraphQLスキーマエラーなら旧クエリへフォールバック
  * @returns {{games: object[], totalCount: number, hasNextPage: boolean, nextCursor: string}}
  */
 export async function fetchLibraryPage({ token, vpcId, cursor = '', locale = 'en_US', fetchCount = LIBRARY_FETCH_COUNT }) {
@@ -471,15 +506,29 @@ export async function fetchLibraryPage({ token, vpcId, cursor = '', locale = 'en
     cursor,
     filters: LIBRARY_FILTERS,
   };
-  const result = await fetchJson(ENDPOINTS.graphQl, {
-    method: 'POST',
-    headers: graphqlHeaders(token),
-    body: JSON.stringify({ query: LIBRARY_QUERY, variables }),
-  });
-  const payload = assertOk(result, 'GFN library query failed');
-  const graphqlError = graphqlErrorMessage(payload);
-  if (graphqlError) {
-    throw new UpstreamError('graphql_error', graphqlError, { payload });
+  const runQuery = async (query) => {
+    const result = await fetchJson(ENDPOINTS.graphQl, {
+      method: 'POST',
+      headers: graphqlHeaders(token),
+      body: JSON.stringify({ query, variables }),
+    });
+    const payload = assertOk(result, 'GFN library query failed');
+    const graphqlError = graphqlErrorMessage(payload);
+    if (graphqlError) {
+      throw new UpstreamError('graphql_error', graphqlError, { payload });
+    }
+    return payload;
+  };
+  let payload;
+  try {
+    payload = await runQuery(LIBRARY_QUERY_V2);
+  } catch (error) {
+    // stateDetails/playStatus 等をスキーマが拒否した場合は旧クエリで再試行
+    if (error instanceof UpstreamError && error.code === 'graphql_error') {
+      payload = await runQuery(LIBRARY_QUERY);
+    } else {
+      throw error;
+    }
   }
   const apps = payload?.data?.apps;
   const items = Array.isArray(apps?.items) ? apps.items : [];

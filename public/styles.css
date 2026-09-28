@@ -248,6 +248,11 @@ main { max-width: 1200px; margin: 0 auto; padding: 24px 20px 80px; }
   border: 1px solid var(--border);
   color: var(--text-muted);
 }
+.game-badges span.warning {
+  color: #f0b429;
+  border-color: rgba(240, 180, 41, .45);
+  background: rgba(240, 180, 41, .08);
+}
 .game-actions { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .launch-id { font-size: 10px; }
 
