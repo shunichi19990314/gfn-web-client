@@ -16,6 +16,7 @@ const state = {
   loginMode: 'qr', // 'qr' | 'code'
   loginAttempt: null, // { attemptId, deviceCode, intervalMs, expiresAt, timer, countdownTimer }
   launchGame: null, // 起動対象のゲーム
+  regionsForLaunch: null, // /api/regions のキャッシュ
   stream: null, // { gfnStream, signaling, pollTimer, sessionInfo, startedAt }
 };
 
@@ -455,9 +456,125 @@ async function enterLibrary() {
 
 // ---------- Phase 2A: ゲーム起動 → 映像受信 ----------
 
+// リージョン選択
+const REGION_STORAGE_KEY = 'gfnweb_region';
+const ZONE_CITY_NAMES = {
+  TYO: '東京', NRT: '東京', LAX: 'ロサンゼルス', SJC: 'サンノゼ', SEA: 'シアトル',
+  DEN: 'デンバー', DAL: 'ダラス', ATL: 'アトランタ', MIA: 'マイアミ', ORD: 'シカゴ',
+  ASH: 'アッシュバーン', IAD: 'アッシュバーン', EWR: 'ニューアーク', BOS: 'ボストン',
+  YYZ: 'トロント', YUL: 'モントリオール', AMS: 'アムステルダム', FRA: 'フランクフルト',
+  LON: 'ロンドン', PAR: 'パリ', MAD: 'マドリード', MIL: 'ミラノ', STO: 'ストックホルム',
+  OSL: 'オスロ', HEL: 'ヘルシンキ', CPH: 'コペンハーゲン', WAW: 'ワルシャワ',
+  SGP: 'シンガポール', SYD: 'シドニー', MEL: 'メルボルン', AKL: 'オークランド',
+};
+
+function regionLabel(region) {
+  // "NP-TYO-01" / "np-tyo-01.cloudmatchbeta..." → 都市名(推定)+ 原名
+  const name = region.name ?? '';
+  const codeMatch = name.toUpperCase().match(/-([A-Z]{3})-/);
+  const city = codeMatch ? ZONE_CITY_NAMES[codeMatch[1]] : null;
+  return city ? `${city} (${name})` : name;
+}
+
+async function populateRegionSelect() {
+  const select = $('launch-region');
+  const saved = localStorage.getItem(REGION_STORAGE_KEY) ?? 'auto';
+  if (state.regionsForLaunch) {
+    renderRegionOptions(select, state.regionsForLaunch, saved);
+    return;
+  }
+  try {
+    const info = await api('/api/regions');
+    state.regionsForLaunch = info;
+    renderRegionOptions(select, info, saved);
+  } catch (error) {
+    select.innerHTML = '<option value="auto" selected>自動(リージョン取得失敗: 再ログインで再試行)</option>';
+  }
+}
+
+function renderRegionOptions(select, info, saved) {
+  select.innerHTML = '';
+  const auto = document.createElement('option');
+  auto.value = 'auto';
+  auto.textContent = '自動(サーバーにおまかせ)';
+  select.appendChild(auto);
+  const regions = info.regions ?? [];
+  // local-region を先頭に
+  const sorted = [...regions].sort((a, b) => {
+    const la = a.name === info.localRegion ? 0 : 1;
+    const lb = b.name === info.localRegion ? 0 : 1;
+    return la - lb || a.name.localeCompare(b.name);
+  });
+  let savedExists = false;
+  for (const region of sorted) {
+    const option = document.createElement('option');
+    option.value = region.url;
+    const local = region.name === info.localRegion ? ' ★local' : '';
+    const baseLabel = `${regionLabel(region)}${local}`;
+    option.dataset.baseLabel = baseLabel;
+    option.textContent = baseLabel;
+    option.dataset.regionName = region.name;
+    if (region.url === saved) savedExists = true;
+    select.appendChild(option);
+  }
+  select.value = savedExists ? saved : 'auto';
+}
+
+async function measureRegionLatency() {
+  const info = state.regionsForLaunch;
+  if (!info?.regions?.length) return;
+  const btn = $('region-ping-btn');
+  const statusEl = $('region-ping-status');
+  btn.disabled = true;
+  statusEl.textContent = '計測中…';
+  const select = $('launch-region');
+  const measure = async (url) => {
+    const target = `${url.replace(/\/$/, '')}/v2/serverInfo`;
+    const once = async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3000);
+      const start = performance.now();
+      try {
+        await fetch(target, { mode: 'no-cors', cache: 'no-store', signal: controller.signal });
+        return Math.round(performance.now() - start);
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    await once(); // ウォームアップ(DNS/TCP経路を慣らす — regionPing.ts に倣う)
+    const samples = [];
+    for (let i = 0; i < 2; i++) {
+      const ms = await once();
+      if (ms !== null) samples.push(ms);
+    }
+    return samples.length ? Math.round(samples.reduce((a, b) => a + b, 0) / samples.length) : null;
+  };
+  // 並列4で全リージョンを計測
+  const queue = [...info.regions];
+  const results = new Map();
+  const worker = async () => {
+    while (queue.length > 0) {
+      const region = queue.shift();
+      results.set(region.url, await measure(region.url));
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  for (const option of select.options) {
+    if (option.value === 'auto') continue;
+    const ms = results.get(option.value);
+    option.textContent = `${option.dataset.baseLabel ?? option.value} — ${ms !== null && ms !== undefined ? `${ms}ms` : '計測失敗'}`;
+  }
+  statusEl.textContent = `計測完了(${results.size}リージョン)。数値はTLS接続込みのおおよその往復時間です。`;
+  btn.disabled = false;
+}
+
 function openLaunchModal(game) {
   state.launchGame = game;
   $('launch-title').textContent = `${game.title} を起動`;
+  $('region-ping-status').textContent = '';
+  populateRegionSelect();
   const modal = $('launch-modal');
   if (!modal.open) modal.showModal();
 }
@@ -498,8 +615,12 @@ async function launchGame() {
   $('stream-session-meta').textContent = '';
   $('stream-stats').classList.add('hidden');
   $('stream-status-card').classList.remove('hidden');
-  setStreamStatus('CloudMatchセッションを作成中…', `appId ${game.launchAppId} / ${settings.resolution}@${settings.fps} / ${settings.maxBitrateMbps}Mbps`);
+  setStreamStatus('CloudMatchセッションを作成中…', `appId ${game.launchAppId} / ${settings.resolution}@${settings.fps} / ${settings.maxBitrateMbps}Mbps / リージョン: ${regionText}`);
 
+  const selectedRegion = $('launch-region').value;
+  localStorage.setItem(REGION_STORAGE_KEY, selectedRegion);
+  const regionOption = $('launch-region').selectedOptions[0];
+  const regionText = selectedRegion === 'auto' ? '自動' : (regionOption?.dataset?.baseLabel ?? selectedRegion);
   let info;
   try {
     ({ session: info } = await api('/api/session/start', {
@@ -508,6 +629,7 @@ async function launchGame() {
         appId: game.launchAppId,
         title: game.title,
         settings,
+        region: selectedRegion === 'auto' ? undefined : selectedRegion,
       }),
     }));
   } catch (error) {
@@ -728,6 +850,7 @@ async function init() {
   });
 
   // 起動モーダル
+  $('region-ping-btn').addEventListener('click', measureRegionLatency);
   $('launch-form').addEventListener('submit', (event) => {
     if (event.submitter?.value === 'launch') {
       event.preventDefault();

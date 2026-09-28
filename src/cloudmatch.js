@@ -649,6 +649,24 @@ async function resolveCreateBase(requested, token, deviceHashId) {
 }
 
 /**
+ * 起動時のリージョン指定を解決する。
+ * region が指定されれば信頼検証のうえそれを使い(明示指定時は resolveCreateBase を
+ * 経由せず直接そのゾーン基にPOSTする — Electron版 settings.region と同じ挙動、
+ * cloudmatch.rs:765-787 requested_streaming_base + 717-721)、
+ * 無ければプロバイダ既定基を返す。
+ */
+export function resolveRequestedRegion(region, providerBase) {
+  if (typeof region === 'string' && region.trim() !== '' && region.trim() !== 'auto') {
+    const base = trustedCloudmatchBase(region.trim());
+    if (!base) {
+      throw new UpstreamError('invalid_params', `Untrusted region URL: ${region}`);
+    }
+    return base.href;
+  }
+  return providerBase;
+}
+
+/**
  * セッション作成(cloudmatch.rs:57-155 create)
  * @returns {{info: object, base: URL, zone: string}}
  */

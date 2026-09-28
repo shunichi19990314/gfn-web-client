@@ -161,6 +161,15 @@
     <form method="dialog" id="launch-form">
       <h2 id="launch-title">ゲームを起動</h2>
       <div class="launch-grid">
+        <label class="launch-region">サーバーリージョン
+          <span class="region-row">
+            <select id="launch-region">
+              <option value="auto" selected>自動(サーバーにおまかせ)</option>
+            </select>
+            <button id="region-ping-btn" class="btn small ghost" type="button" title="各リージョンへの接続時間を計測します">遅延計測</button>
+          </span>
+          <span id="region-ping-status" class="region-ping-status muted"></span>
+        </label>
         <label>解像度
           <select id="launch-resolution">
             <option value="1280x720">720p</option>

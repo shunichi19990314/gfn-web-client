@@ -23,6 +23,9 @@ Phase 2A のスコープ(映像受信まで):
 - ✅ **WebRTC映像受信**(サーバーOFFER → ANSWER+**nvstSdp**(公式Webクライアントとバイト整合の属性セット)→ ICE交換 → `<video>`表示)
 - ✅ DataChannel開設(`stats_channel` / `input_channel_v1` / `input_channel_partially_reliable`)+ 2秒間隔ハートビート
 - ✅ 起動設定(解像度/フレームレート/ビットレート/キーボード配列/ゲーム内言語)、統計オーバーレイ(RTT/ビットレート/解像度)、待機行列表示
+- ✅ **サーバーリージョン選択**(起動モーダルから `v2/serverInfo` のリージョン一覧を選択、
+  都市名の推定表示・★local マーク・no-cors fetchによる遅延計測ボタン付き。選択はlocalStorageに保存され、
+  明示指定時はそのゾーン基(例 `np-tyo-01.cloudmatchbeta.nvidiagrid.net`)へ直接セッション作成)
 - ⛔ **入力送信(キー/マウス/ゲームパッド)はPhase 2B**。映像視聴のみで操作不可
 - ⛔ 無料枠の広告再生(sessionAds)未対応、HEVC/AV1は未検証(H264優先固定)、ストア連携(Phase 5)
 
@@ -170,7 +173,7 @@ railway config apply
 | GET | `/api/regions` | v2/serverInfo → vpcId + リージョン一覧 |
 | GET | `/api/library?cursor=` | ライブラリ1ページ(200件/cursor) |
 | GET | `/api/subscription` | MES購読情報 |
-| POST | `/api/session/start` | CloudMatchセッション作成 `{appId, title, settings}` → session info |
+| POST | `/api/session/start` | CloudMatchセッション作成 `{appId, title, settings, region?}` → session info(region=リージョン基URL、省略時は自動。信頼ホスト検証あり) |
 | GET | `/api/session/poll` | セッション状態ポーリング(status/queuePosition/signalingUrl/iceServers) |
 | GET | `/api/session/active` | 現在のアクティブセッション |
 | POST | `/api/session/stop` | セッション終了(DELETE v2/session) |

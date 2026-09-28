@@ -190,3 +190,38 @@ test('normalizeIceServers: username/credential 透過', () => {
   const servers = normalizeIceServers({ iceServerConfiguration: { iceServers: [{ urls: 'turn:t:3478', username: 'u', credential: 'c' }] } });
   assert.deepEqual(servers[0], { urls: ['turn:t:3478'], username: 'u', credential: 'c' });
 });
+
+// ---- リージョン指定(Phase 2A+) ----
+
+test('resolveRequestedRegion: 明示指定は信頼検証して正規化', async () => {
+  const { resolveRequestedRegion } = await import('../src/cloudmatch.js');
+  assert.equal(
+    resolveRequestedRegion('https://np-tyo-01.cloudmatchbeta.nvidiagrid.net', 'https://prod.cloudmatchbeta.nvidiagrid.net/'),
+    'https://np-tyo-01.cloudmatchbeta.nvidiagrid.net/',
+  );
+  // パートナーゾーン(bpc)も信頼ホスト
+  assert.equal(
+    resolveRequestedRegion('https://th.bpc.geforcenow.nvidiagrid.net/', 'x'),
+    'https://th.bpc.geforcenow.nvidiagrid.net/',
+  );
+});
+
+test('resolveRequestedRegion: 信頼できないホストは拒否', async () => {
+  const { resolveRequestedRegion } = await import('../src/cloudmatch.js');
+  assert.throws(
+    () => resolveRequestedRegion('https://np-tyo-01.cloudmatchbeta.nvidiagrid.net.evil.example', 'x'),
+    (error) => error.code === 'invalid_params',
+  );
+  assert.throws(
+    () => resolveRequestedRegion('http://np-tyo-01.cloudmatchbeta.nvidiagrid.net', 'x'),
+    (error) => error.code === 'invalid_params',
+  );
+});
+
+test('resolveRequestedRegion: 未指定/auto はプロバイダ既定', async () => {
+  const { resolveRequestedRegion } = await import('../src/cloudmatch.js');
+  const fallback = 'https://prod.cloudmatchbeta.nvidiagrid.net/';
+  assert.equal(resolveRequestedRegion(undefined, fallback), fallback);
+  assert.equal(resolveRequestedRegion('', fallback), fallback);
+  assert.equal(resolveRequestedRegion('auto', fallback), fallback);
+});

@@ -10,6 +10,7 @@ import {
   createSession,
   pollSession,
   reportAd,
+  resolveRequestedRegion,
   stopSession,
 } from './cloudmatch.js';
 import {
@@ -307,7 +308,7 @@ export async function registerRoutes(app) {
     const session = await requireSession(request, reply);
     if (!session) return;
     if (!limit(request, reply, 'session-start', { max: 20, windowMs: 60 * 1000 })) return;
-    const { appId, title, appLaunchMode, settings } = request.body ?? {};
+    const { appId, title, appLaunchMode, settings, region } = request.body ?? {};
     if (!/^\d+$/.test(String(appId ?? ''))) {
       return reply.code(400).send({ error: 'invalid_params', message: 'appId must be numeric (launchAppId)' });
     }
@@ -325,7 +326,7 @@ export async function registerRoutes(app) {
       settings: settings ?? {},
       token: sessionToken(session.tokens),
       deviceHashId: session.deviceHashId,
-      providerBase: resolveProviderBase(session),
+      providerBase: resolveRequestedRegion(region, resolveProviderBase(session)),
     });
     store.setActiveSession(session.sid, {
       sessionId: info.sessionId,
