@@ -1,0 +1,16 @@
+# Render Blueprint — gfn-web-mvp
+# ダッシュボードの "New +" → "Blueprint" でこのリポジトリを接続すると一括デプロイされる。
+services:
+  - type: web
+    name: gfn-web-mvp
+    runtime: node
+    plan: free              # 常時稼働・スピンダウン回避が必要なら starter
+    region: singapore       # 日本からのシグナリング/API遅延が最小の選択肢
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 20.18.1
+      - key: NODE_ENV
+        value: production
