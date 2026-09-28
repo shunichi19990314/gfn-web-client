@@ -5,6 +5,14 @@ import QRCode from 'qrcode';
 
 import { DEFAULT_STREAMING_URL, TOKEN_REFRESH_WINDOW_MS, isTrustedStreamingBase } from './config.js';
 import {
+  SessionConflictError,
+  claimSession,
+  createSession,
+  pollSession,
+  reportAd,
+  stopSession,
+} from './cloudmatch.js';
+import {
   deviceAuthorize,
   deviceTokenPoll,
   ensureClientToken,
@@ -278,6 +286,170 @@ export async function registerRoutes(app) {
 
   // ---- 購読情報 ----
 
+  // ---- セッション(CloudMatch) ----
+
+  function resolveProviderBase(session) {
+    return isTrustedStreamingBase(session.provider?.streamingServiceUrl)
+      ? session.provider.streamingServiceUrl
+      : DEFAULT_STREAMING_URL;
+  }
+
+  function requireActiveSession(sid, reply) {
+    const active = store.getActiveSession(sid);
+    if (!active) {
+      reply.code(404).send({ error: 'no_active_session', message: 'No active GeForce NOW session' });
+      return null;
+    }
+    return active;
+  }
+
+  app.post('/api/session/start', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    if (!limit(request, reply, 'session-start', { max: 20, windowMs: 60 * 1000 })) return;
+    const { appId, title, appLaunchMode, settings } = request.body ?? {};
+    if (!/^\d+$/.test(String(appId ?? ''))) {
+      return reply.code(400).send({ error: 'invalid_params', message: 'appId must be numeric (launchAppId)' });
+    }
+    const existing = store.getActiveSession(session.sid);
+    if (existing) {
+      return reply.code(409).send({
+        error: 'session_conflict',
+        message: 'A session is already active on this browser tab.',
+        session: existing.info,
+      });
+    }
+    const { info, base, zone } = await createSession({
+      appId: String(appId),
+      params: { title: typeof title === 'string' ? title : null, appLaunchMode, zone: undefined },
+      settings: settings ?? {},
+      token: sessionToken(session.tokens),
+      deviceHashId: session.deviceHashId,
+      providerBase: resolveProviderBase(session),
+    });
+    store.setActiveSession(session.sid, {
+      sessionId: info.sessionId,
+      controlBase: info.streamingBaseUrl,
+      serverIp: info.serverIp,
+      zone,
+      appId: String(appId),
+      keyboardLayout: info.keyboardLayout,
+      resumePending: false,
+      requestedBase: base.href,
+      info,
+    });
+    request.log.info({ sessionId: info.sessionId, zone, status: info.status }, 'CloudMatch session created');
+    reply.code(201).send({ session: info });
+  });
+
+  app.get('/api/session/poll', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const active = requireActiveSession(session.sid, reply);
+    if (!active) return;
+    if (!limit(request, reply, 'session-poll', { max: 300, windowMs: 60_000 })) return;
+    const info = await pollSession({
+      state: active,
+      token: sessionToken(session.tokens),
+      deviceHashId: session.deviceHashId,
+    });
+    active.info = info;
+    active.controlBase = info.streamingBaseUrl;
+    active.serverIp = info.serverIp;
+    active.resumePending = info.resumePending === true;
+    store.setActiveSession(session.sid, active);
+    return { session: info };
+  });
+
+  app.get('/api/session/active', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    return { session: store.getActiveSession(session.sid)?.info ?? null };
+  });
+
+  app.post('/api/session/stop', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const active = store.getActiveSession(session.sid);
+    if (!active) return { session: null, stopped: false };
+    const result = await stopSession({
+      state: active,
+      token: sessionToken(session.tokens),
+      deviceHashId: session.deviceHashId,
+    });
+    store.clearActiveSession(session.sid);
+    request.log.info({ sessionId: active.sessionId }, 'CloudMatch session stopped');
+    return { session: null, stopped: result.stopped, sessionId: active.sessionId };
+  });
+
+  app.post('/api/session/ad', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const active = requireActiveSession(session.sid, reply);
+    if (!active) return;
+    const info = await reportAd({
+      state: active,
+      params: request.body ?? {},
+      token: sessionToken(session.tokens),
+      deviceHashId: session.deviceHashId,
+    });
+    active.info = info;
+    active.controlBase = info.streamingBaseUrl;
+    active.serverIp = info.serverIp;
+    store.setActiveSession(session.sid, active);
+    return { session: info };
+  });
+
+  // 別デバイス/中断中のセッションを引き継ぐ(RESUME)
+  app.post('/api/session/claim', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    if (!limit(request, reply, 'session-claim', { max: 20, windowMs: 60_000 })) return;
+    const { sessionId, serverIp, streamingBaseUrl, settings } = request.body ?? {};
+    if (typeof sessionId !== 'string' || sessionId === '') {
+      return reply.code(400).send({ error: 'invalid_params', message: 'sessionId is required' });
+    }
+    const { info, controlBase } = await claimSession({
+      sessionId,
+      state: serverIp || streamingBaseUrl
+        ? { sessionId, serverIp: serverIp ?? null, controlBase: streamingBaseUrl ?? null }
+        : store.getActiveSession(session.sid),
+      settings: settings ?? {},
+      token: sessionToken(session.tokens),
+      deviceHashId: session.deviceHashId,
+      providerBase: resolveProviderBase(session),
+    });
+    store.setActiveSession(session.sid, {
+      sessionId: info.sessionId,
+      controlBase: info.streamingBaseUrl ?? controlBase.href,
+      serverIp: info.serverIp,
+      zone: info.zone,
+      appId: info.appId,
+      keyboardLayout: info.keyboardLayout,
+      resumePending: true,
+      info,
+    });
+    request.log.info({ sessionId: info.sessionId }, 'CloudMatch session claimed (RESUME)');
+    return { session: info };
+  });
+
+  // 別デバイスで発生中のセッション(競合)を停止する
+  app.post('/api/session/remote/stop', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    if (!limit(request, reply, 'session-remote-stop', { max: 10, windowMs: 60_000 })) return;
+    const { sessionId, serverIp, streamingBaseUrl } = request.body ?? {};
+    if (typeof sessionId !== 'string' || sessionId === '') {
+      return reply.code(400).send({ error: 'invalid_params', message: 'sessionId is required' });
+    }
+    const result = await stopSession({
+      state: { sessionId, serverIp: serverIp ?? null, controlBase: streamingBaseUrl ?? null },
+      token: sessionToken(session.tokens),
+      deviceHashId: session.deviceHashId,
+    });
+    return { stopped: result.stopped, sessionId };
+  });
+
   app.get('/api/subscription', async (request, reply) => {
     const session = await requireSession(request, reply);
     if (!session) return;
@@ -306,13 +478,21 @@ export async function registerRoutes(app) {
 
 /** UpstreamError → HTTPステータス変換(グローバルエラーハンドラ) */
 export function upstreamErrorHandler(error, request, reply) {
+  if (error instanceof SessionConflictError) {
+    request.log.info({ sessions: error.sessions?.length ?? 0 }, 'session conflict detected');
+    return reply.code(409).send({
+      error: 'session_conflict',
+      message: error.message,
+      sessions: error.sessions ?? [],
+    });
+  }
   if (error instanceof UpstreamError) {
     const status =
       error.code === 'authentication_required'
         ? 401
         : error.code === 'invalid_params'
           ? 400
-          : error.code === 'network_error'
+          : error.code === 'session_error'
             ? 502
             : 502;
     request.log.warn({ code: error.code, message: error.message }, 'upstream error');

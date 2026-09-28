@@ -275,3 +275,115 @@ main { max-width: 1200px; margin: 0 auto; padding: 24px 20px 80px; }
   .qr-wrap { flex-direction: column; }
   .game-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
 }
+
+/* ---- Phase 2A: ストリームビュー ---- */
+.btn.danger { border-color: var(--danger); color: var(--danger); }
+.btn.danger:hover { background: rgba(248, 81, 73, .12); }
+
+.stream-shell {
+  position: relative;
+  background: #000;
+  border-radius: var(--radius);
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  max-height: calc(100vh - 140px);
+  border: 1px solid var(--border);
+}
+.stream-shell:fullscreen { max-height: none; border-radius: 0; }
+#stream-video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+
+.stream-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.stream-status-card {
+  pointer-events: auto;
+  background: rgba(13, 17, 23, .92);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 36px;
+  text-align: center;
+  max-width: 480px;
+}
+.stream-status-card p { margin: 8px 0; }
+#stream-status-text { font-weight: 600; font-size: 16px; }
+#stream-status-detail { font-size: 13px; word-break: break-all; }
+
+.spinner {
+  width: 34px; height: 34px;
+  margin: 0 auto 10px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.stream-stats {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  pointer-events: none;
+  background: rgba(0, 0, 0, .55);
+  color: #c9f76e;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+}
+
+.stream-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.stream-toolbar .spacer { flex: 1; }
+#stream-game-title { font-weight: 700; }
+#stream-session-meta { font-size: 12px; }
+
+.stream-log {
+  margin-top: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+/* ---- 起動モーダル ---- */
+#launch-modal {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px 28px;
+  max-width: 520px;
+  width: calc(100vw - 40px);
+}
+#launch-modal::backdrop { background: rgba(0, 0, 0, .6); }
+#launch-modal h2 { margin: 0 0 16px; font-size: 18px; }
+.launch-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
+}
+.launch-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--text-muted); }
+.launch-grid select {
+  padding: 8px 10px;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+}
+.launch-note { font-size: 12px; margin: 16px 0; line-height: 1.7; }
+.launch-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }

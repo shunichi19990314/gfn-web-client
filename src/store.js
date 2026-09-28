@@ -83,10 +83,28 @@ export function updateSession(sid, session) {
 
 export function deleteSession(sid) {
   sessions.delete(sid);
+  activeSessions.delete(sid);
+}
+
+// ---- アクティブなゲームセッション(CloudMatch) ----
+
+/** @type {Map<string, object>} sid → {sessionId, controlBase, serverIp, zone, appId, keyboardLayout, info, resumePending} */
+const activeSessions = new Map();
+
+export function setActiveSession(sid, state) {
+  activeSessions.set(sid, state);
+}
+
+export function getActiveSession(sid) {
+  return activeSessions.get(sid) ?? null;
+}
+
+export function clearActiveSession(sid) {
+  activeSessions.delete(sid);
 }
 
 export function stats() {
-  return { attempts: attempts.size, sessions: sessions.size };
+  return { attempts: attempts.size, sessions: sessions.size, activeSessions: activeSessions.size };
 }
 
 // ---- 簡易レート制限(IPごと・スライディングウィンドウ) ----

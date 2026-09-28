@@ -7,6 +7,8 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 
 import { registerRoutes, upstreamErrorHandler } from './routes.js';
+import { attachSignalingRelay } from './wsRelay.js';
+import * as store from './store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -30,6 +32,15 @@ export async function buildApp({ logger = true } = {}) {
 
   app.setErrorHandler(upstreamErrorHandler);
   await registerRoutes(app);
+
+  // NVSTシグナリングWSリレー(生HTTPサーバーのupgradeをフック)
+  attachSignalingRelay({
+    app,
+    getSession: (sid) => store.getSession(sid),
+    getActiveSession: (sid) => store.getActiveSession(sid),
+    log: app.log,
+  });
+
   return app;
 }
 

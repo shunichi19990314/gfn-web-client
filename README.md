@@ -14,7 +14,17 @@ Phase 1 のスコープ:
 - ✅ **ライブラリ表示**(GraphQL `GetLibraryApps`、cursorページネーション、検索)
 - ✅ **購読情報**(MES: tier/残り時間/解像度権限)とリージョン表示(v2/serverInfo)
 - ✅ レート制限・HttpOnly Cookie・アップストリームエラー正規化
-- ⛔ セッション作成/ストリーミング(Phase 2)、ストア連携(Phase 5)
+
+Phase 2A のスコープ(映像受信まで):
+
+- ✅ **CloudMatchセッションAPI**(`POST/GET/PUT/DELETE v2/session`、RESUME、競合検出とリモート停止)
+- ✅ **NVSTシグナリングWSリレー**(`/ws/signaling` ↔ `wss://{serverIp}:443/nvst/sign_in`)
+  — ブラウザWSはカスタムヘッダを送れないため、サーバー側でOrigin/UA/サブプロトコルを公式相当に差し替えて中継
+- ✅ **WebRTC映像受信**(サーバーOFFER → ANSWER+**nvstSdp**(公式Webクライアントとバイト整合の属性セット)→ ICE交換 → `<video>`表示)
+- ✅ DataChannel開設(`stats_channel` / `input_channel_v1` / `input_channel_partially_reliable`)+ 2秒間隔ハートビート
+- ✅ 起動設定(解像度/フレームレート/ビットレート/キーボード配列/ゲーム内言語)、統計オーバーレイ(RTT/ビットレート/解像度)、待機行列表示
+- ⛔ **入力送信(キー/マウス/ゲームパッド)はPhase 2B**。映像視聴のみで操作不可
+- ⛔ 無料枠の広告再生(sessionAds)未対応、HEVC/AV1は未検証(H264優先固定)、ストア連携(Phase 5)
 
 > **免責**: NVIDIA非公式クライアントです。GeForce NOW利用規約に抵触する可能性があり、
 > アカウントリスク・API仕様変更による破損リスクがあります。検証はサブアカウントで。
@@ -46,18 +56,25 @@ OpenNOW本体(デスクトップ/モバイル)も同様の理由でデバイス�
 ## アーキテクチャ
 
 ```
-ブラウザ(public/) ──同一オリジン──▶ Fastify(src/) ──HTTPS──▶ NVIDIA各API
-   │                                  │  ・login.nvidia.com   (OAuth device flow)
-   │  QR表示・ポーリング・ライブラリUI   │  ・pcs.geforcenow.com (providers)
-   └──────────────────────────────────┤  ・games.geforce.com  (GraphQL catalog)
-      Cookie: gfnweb_sid (HttpOnly)   │  ・mes.geforcenow.com (subscription)
-                                      │  ・*.nvidiagrid.net   (serverInfo/vpcId)
-                                      └─ セッションはプロセス内メモリ(Map)に保存
-                                         ※トークンはブラウザに一切返さない
+ブラウザ(public/) ──同一オリジン HTTP/WS──▶ Fastify(src/) ──HTTPS──▶ NVIDIA各API
+   │                                          │  ・login.nvidia.com   (OAuth device flow)
+   │  QR/コード入力・ライブラリUI               │  ・pcs.geforcenow.com (providers)
+   │                                          │  ・games.geforce.com  (GraphQL catalog)
+   │  /ws/signaling (NVSTシグナリング中継)      │  ・mes.geforcenow.com (subscription)
+   │ ◀───────────────────────────────────────▶ │  ・{zone}.cloudmatchbeta.nvidiagrid.net
+   │                                          │      (v2/session = CloudMatch セッションAPI)
+   │  WebRTC: 映像/音声/DataChannel            │  ・wss://{serverIp}:443/nvst/sign_in
+   │ ◀════════ GPUサーバーと直接通信 ═════════▶ │      (Origin/UA/サブプロトコルを中継時に付与)
+   │   ※メディアはPaaSを経由しない
+      Cookie: gfnweb_sid (HttpOnly)            └─ セッション/アクティブセッションはプロセス内メモリ
+                                                  ※NVIDIAトークンはブラウザに一切返さない
 ```
 
-- CORS: NVIDIA側APIはサードパーティOriginを拒否するため、**すべてのHTTPはサーバー側プロキシ経由**
-- メディア(Phase 2)はブラウザ↔NVIDIA間の直接WebRTCになるため、Renderの帯域は消費しない
+- **CORS**: NVIDIA側APIはサードパーティOriginを拒否するため、すべてのHTTPはサーバー側プロキシ経由
+- **シグナリング**: ブラウザのWebSocket APIはカスタムヘッダを送れないため、
+  `/ws/signaling` でサーバーが中継し、上流に `Origin: https://play.geforcenow.com` /
+  GFN User-Agent / サブプロトコル `x-nv-sessionid.{sessionId}` を付与する
+- **メディア**: 映像・音声・入力はブラウザ↔GPUサーバーの直接WebRTC。PaaSの帯域は消費しない
 
 ## ローカル起動
 
@@ -153,6 +170,14 @@ railway config apply
 | GET | `/api/regions` | v2/serverInfo → vpcId + リージョン一覧 |
 | GET | `/api/library?cursor=` | ライブラリ1ページ(200件/cursor) |
 | GET | `/api/subscription` | MES購読情報 |
+| POST | `/api/session/start` | CloudMatchセッション作成 `{appId, title, settings}` → session info |
+| GET | `/api/session/poll` | セッション状態ポーリング(status/queuePosition/signalingUrl/iceServers) |
+| GET | `/api/session/active` | 現在のアクティブセッション |
+| POST | `/api/session/stop` | セッション終了(DELETE v2/session) |
+| POST | `/api/session/claim` | 既存セッションの引き継ぎ(PUT RESUME) |
+| POST | `/api/session/remote/stop` | 競合(別デバイス)セッションの停止 |
+| POST | `/api/session/ad` | 広告視聴状態の報告(PUT action:6) |
+| WS | `/ws/signaling?sessionId=` | NVSTシグナリングリレー(認証Cookie必須)→ `wss://{serverIp}:443/nvst/sign_in` |
 
 ## 既知の制限(MVP)
 

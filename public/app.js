@@ -1,5 +1,7 @@
-// フロントエンドMVP: デバイスフローログイン(QR/手動コード)+ トークンインポート + ライブラリ表示
-// 依存ライブラリなし(バニラJS)。バックエンドは同一オリジンの /api/*
+// フロントエンド: デバイスフローログイン(QR/手動コード)+ トークンインポート + ライブラリ表示
+// + Phase 2A: ゲーム起動 → セッション確立 → NVSTシグナリング → WebRTC映像受信
+import { NvstSignalingClient } from './js/signaling.js';
+import { GfnStream } from './js/stream.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -13,6 +15,8 @@ const state = {
   searchQuery: '',
   loginMode: 'qr', // 'qr' | 'code'
   loginAttempt: null, // { attemptId, deviceCode, intervalMs, expiresAt, timer, countdownTimer }
+  launchGame: null, // 起動対象のゲーム
+  stream: null, // { gfnStream, signaling, pollTimer, sessionInfo, startedAt }
 };
 
 // ---------- ユーティリティ ----------
@@ -36,6 +40,7 @@ async function api(path, options = {}) {
     const error = new Error(payload?.message ?? `HTTP ${response.status}`);
     error.code = payload?.error ?? 'http_error';
     error.status = response.status;
+    error.payload = payload;
     throw error;
   }
   return payload;
@@ -44,6 +49,7 @@ async function api(path, options = {}) {
 function showView(name) {
   $('view-login').classList.toggle('hidden', name !== 'login');
   $('view-library').classList.toggle('hidden', name !== 'library');
+  $('view-stream').classList.toggle('hidden', name !== 'stream');
 }
 
 async function copyText(text) {
@@ -100,13 +106,11 @@ async function startDeviceLogin() {
       attemptId: auth.attemptId,
       deviceCode: auth.deviceCode,
       userCode: auth.userCode,
-      verificationUriComplete: auth.verificationUriComplete,
-      intervalMs: (auth.intervalSeconds || 5) * 1000,
       expiresAt: auth.expiresAt,
+      intervalMs: (auth.intervalSeconds || 5) * 1000,
     };
     $('login-idle').classList.add('hidden');
     $('login-pending').classList.remove('hidden');
-    // QRパネル
     $('pending-qr').classList.toggle('hidden', state.loginMode !== 'qr');
     $('pending-code').classList.toggle('hidden', state.loginMode !== 'code');
     $('qr-image').src = auth.qrDataUrl;
@@ -115,8 +119,7 @@ async function startDeviceLogin() {
     const link = $('verification-link');
     link.href = auth.verificationUriComplete;
     link.textContent = 'コード入力ページ(コード入力済みリンク)';
-    const openBtn = $('open-pin-page-btn');
-    openBtn.href = auth.verificationUriComplete;
+    $('open-pin-page-btn').href = auth.verificationUriComplete;
     setLoginStatus('承認待ち… (NVIDIA IDでログインし、コードを承認してください)');
     startCountdown();
     schedulePoll();
@@ -138,9 +141,7 @@ function startCountdown() {
   const update = () => {
     if (!state.loginAttempt) return;
     const remaining = Math.max(0, Math.floor((state.loginAttempt.expiresAt - Date.now()) / 1000));
-    const minutes = Math.floor(remaining / 60);
-    const seconds = String(remaining % 60).padStart(2, '0');
-    const text = remaining > 0 ? `${minutes}:${seconds}` : '期限切れ';
+    const text = remaining > 0 ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}` : '期限切れ';
     $('expiry-countdown').textContent = text;
     $('expiry-countdown2').textContent = text;
     if (remaining <= 0) {
@@ -271,6 +272,7 @@ async function importToken() {
 // ---------- ログアウト / ライブラリ ----------
 
 async function logout() {
+  await stopStream({ silent: true });
   try {
     await api('/api/auth/logout', { method: 'POST' });
   } catch { /* サーバー側はCookieなしでも無害 */ }
@@ -351,9 +353,7 @@ async function loadLibraryPage({ reset = false } = {}) {
   } catch (error) {
     statusEl.textContent = '';
     showToast(`ライブラリ取得に失敗: ${error.message}`);
-    if (error.status === 401) {
-      await logout();
-    }
+    if (error.status === 401) await logout();
   } finally {
     loadMoreBtn.disabled = false;
   }
@@ -396,7 +396,15 @@ function renderGames() {
       badge.textContent = `最終プレイ: ${String(game.lastPlayed).slice(0, 10)}`;
       badges.appendChild(badge);
     }
-    node.querySelector('.launch-id').textContent = game.launchAppId ? `appId ${game.launchAppId}` : 'launch id なし';
+    const launchBtn = node.querySelector('.launch-btn');
+    if (game.launchAppId) {
+      node.querySelector('.launch-id').textContent = `appId ${game.launchAppId}`;
+      launchBtn.addEventListener('click', () => openLaunchModal(game));
+    } else {
+      node.querySelector('.launch-id').textContent = 'launch id なし';
+      launchBtn.disabled = true;
+      launchBtn.title = '数値のlaunchAppIdがないため起動できません';
+    }
     fragment.appendChild(node);
   }
   grid.appendChild(fragment);
@@ -407,6 +415,241 @@ async function enterLibrary() {
   renderUserChip(state.session);
   showView('library');
   await Promise.all([loadLibraryPage({ reset: true }), loadSubscription(), loadRegions()]);
+}
+
+// ---------- Phase 2A: ゲーム起動 → 映像受信 ----------
+
+function openLaunchModal(game) {
+  state.launchGame = game;
+  $('launch-title').textContent = `${game.title} を起動`;
+  const modal = $('launch-modal');
+  if (!modal.open) modal.showModal();
+}
+
+function collectLaunchSettings() {
+  const [resolution, fps, maxBitrateMbps, keyboardLayout, gameLanguage] = [
+    $('launch-resolution').value,
+    Number($('launch-fps').value),
+    Number($('launch-bitrate').value),
+    $('launch-keyboard').value,
+    $('launch-language').value,
+  ];
+  return { resolution, fps, maxBitrateMbps, keyboardLayout, gameLanguage };
+}
+
+function setStreamStatus(text, detail = '') {
+  $('stream-status-text').textContent = text;
+  $('stream-status-detail').textContent = detail;
+}
+
+function streamLog(message) {
+  const log = $('stream-log');
+  const line = document.createElement('div');
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+  log.appendChild(line);
+  while (log.childElementCount > 200) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function launchGame() {
+  const game = state.launchGame;
+  if (!game?.launchAppId) return;
+  const settings = collectLaunchSettings();
+  showView('stream');
+  $('stream-log').innerHTML = '';
+  $('stream-log').classList.remove('hidden');
+  $('stream-game-title').textContent = game.title;
+  $('stream-session-meta').textContent = '';
+  $('stream-stats').classList.add('hidden');
+  $('stream-status-card').classList.remove('hidden');
+  setStreamStatus('CloudMatchセッションを作成中…', `appId ${game.launchAppId} / ${settings.resolution}@${settings.fps} / ${settings.maxBitrateMbps}Mbps`);
+
+  let info;
+  try {
+    ({ session: info } = await api('/api/session/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        appId: game.launchAppId,
+        title: game.title,
+        settings,
+      }),
+    }));
+  } catch (error) {
+    if (error.code === 'session_conflict') {
+      if (error.payload?.session?.sessionId) {
+        // 同一ブラウザの既存セッション → それに復帰
+        state.stream = { gfnStream: null, signaling: null, pollTimer: null, sessionInfo: error.payload.session, startedAt: Date.now() };
+        setStreamStatus('既存セッションに復帰します…');
+        startSessionPolling();
+        return;
+      }
+      await handleSessionConflict(error);
+      return;
+    }
+    setStreamStatus('セッション作成に失敗', error.message);
+    return;
+  }
+  state.stream = { gfnStream: null, signaling: null, pollTimer: null, sessionInfo: info, startedAt: Date.now() };
+  setStreamStatus(`セッション準備中… (status=${info.status} ${info.phase})`);
+  startSessionPolling();
+}
+
+async function handleSessionConflict(error) {
+  const sessions = error.payload?.sessions ?? [];
+  if (sessions.length === 0) {
+    setStreamStatus('既にアクティブなセッションがあります', error.message);
+    return;
+  }
+  const target = sessions[0];
+  setStreamStatus('他のデバイスでセッションが実行中', `sessionId: ${target.sessionId} (status=${target.phase})`);
+  const stopBtn = $('stream-cancel-btn');
+  stopBtn.textContent = '既存セッションを停止して戻る';
+  stopBtn.onclick = async () => {
+    stopBtn.disabled = true;
+    try {
+      await api('/api/session/remote/stop', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: target.sessionId, serverIp: target.serverIp, streamingBaseUrl: target.streamingBaseUrl }),
+      });
+      showToast('既存セッションを停止しました。もう一度起動してください。');
+      stopBtn.textContent = 'キャンセル';
+      stopBtn.onclick = null;
+      await exitStreamView();
+    } catch (stopError) {
+      showToast(`停止に失敗: ${stopError.message}`);
+      stopBtn.disabled = false;
+    }
+  };
+}
+
+function startSessionPolling() {
+  const stream = state.stream;
+  if (!stream) return;
+  const deadline = Date.now() + 3 * 60 * 1000; // 3分タイムアウト
+  const poll = async () => {
+    if (!state.stream) return;
+    if (Date.now() > deadline) {
+      setStreamStatus('セッション準備がタイムアウトしました', '3分以内にreadyになりませんでした');
+      return;
+    }
+    let info;
+    try {
+      ({ session: info } = await api('/api/session/poll'));
+    } catch (error) {
+      setStreamStatus('ポーリング失敗', error.message);
+      state.stream.pollTimer = setTimeout(poll, 3000);
+      return;
+    }
+    state.stream.sessionInfo = info;
+    updateSessionUi(info);
+    if ([2, 3].includes(info.status) && info.signalingUrl && info.iceServers?.length && !state.stream.gfnStream) {
+      clearInterval(state.stream.pollTimer);
+      state.stream.pollTimer = null;
+      await beginStreaming(info);
+      return; // ストリーミング開始後はポーリング停止
+    }
+    if (info.phase === 'failed') {
+      setStreamStatus('セッションが失敗しました', `status=${info.status}`);
+      return;
+    }
+    state.stream.pollTimer = setTimeout(poll, 1000);
+  };
+  stream.pollTimer = setTimeout(poll, 500);
+}
+
+function updateSessionUi(info) {
+  const meta = [info.zone, info.gpuType, info.serverLocation].filter(Boolean).join(' / ');
+  $('stream-session-meta').textContent = meta;
+  if (info.queuePosition) {
+    setStreamStatus('待機行列にいます…', `現在地: ${info.queuePosition} 番目 / status=${info.status}`);
+  } else if (info.adState?.active) {
+    setStreamStatus('広告の視聴が必要です(無料枠)', 'Phase 2Aでは広告再生に未対応です。セッションを終了してください。');
+  } else if (info.phase === 'resuming') {
+    setStreamStatus('セッションを再開中…', `status=${info.status}`);
+  } else if (info.phase === 'preparing' || info.phase === 'requesting') {
+    setStreamStatus('GPUサーバーを準備中…', `status=${info.status} ${meta}`);
+  }
+}
+
+async function beginStreaming(info) {
+  const stream = state.stream;
+  const settings = collectLaunchSettings();
+  setStreamStatus('WebRTCシグナリング接続中…', info.signalingUrl);
+  const signaling = new NvstSignalingClient(info.sessionId, { resolution: settings.resolution });
+  const gfnStream = new GfnStream({
+    videoEl: $('stream-video'),
+    session: info,
+    settings: {
+      resolution: settings.resolution,
+      fps: settings.fps,
+      maxBitrateKbps: settings.maxBitrateMbps * 1000,
+      colorQuality: '8bit_420',
+    },
+    signaling,
+    callbacks: {
+      onLog: streamLog,
+      onState: (connectionState) => {
+        streamLog(`PeerConnection: ${connectionState}`);
+        if (connectionState === 'connected') setStreamStatus('接続完了。映像を待機中…');
+      },
+      onStats: (stats) => {
+        const el = $('stream-stats');
+        el.classList.remove('hidden');
+        el.textContent = [
+          stats.connectionState,
+          stats.codec,
+          stats.resolution,
+          stats.fps != null ? `${Math.round(stats.fps)} fps` : null,
+          stats.bitrateKbps != null ? `${(stats.bitrateKbps / 1000).toFixed(1)} Mbps` : null,
+          stats.rttMs != null ? `RTT ${stats.rttMs}ms` : null,
+        ].filter(Boolean).join(' · ');
+      },
+      onError: (message) => {
+        streamLog(`ERROR: ${message}`);
+        setStreamStatus('ストリームエラー', message);
+        $('stream-status-card').classList.remove('hidden');
+      },
+    },
+  });
+  stream.signaling = signaling;
+  stream.gfnStream = gfnStream;
+  $('stream-video').addEventListener('playing', () => {
+    $('stream-status-card').classList.add('hidden');
+    const elapsed = Math.round((Date.now() - stream.startedAt) / 1000);
+    streamLog(`映像再生開始(起動から${elapsed}秒)`);
+  }, { once: true });
+  try {
+    await gfnStream.start();
+    setStreamStatus('サーバーのSDPオファーを待機中…', 'シグナリング接続済み');
+  } catch (error) {
+    setStreamStatus('ストリーミング開始に失敗', error.message);
+  }
+}
+
+async function stopStream({ silent = false } = {}) {
+  const stream = state.stream;
+  state.stream = null;
+  if (stream?.pollTimer) clearTimeout(stream.pollTimer);
+  try { stream?.gfnStream?.dispose(); } catch { /* ignore */ }
+  if (!silent && state.session) {
+    try {
+      await api('/api/session/stop', { method: 'POST' });
+    } catch (error) {
+      if (!silent) showToast(`セッション停止: ${error.message}`);
+    }
+  } else if (silent && state.session) {
+    api('/api/session/stop', { method: 'POST' }).catch(() => {});
+  }
+}
+
+async function exitStreamView() {
+  await stopStream();
+  const stopBtn = $('stream-cancel-btn');
+  stopBtn.textContent = 'キャンセル';
+  stopBtn.onclick = null;
+  stopBtn.disabled = false;
+  $('stream-video').srcObject = null;
+  showView('library');
 }
 
 // ---------- 初期化 ----------
@@ -431,6 +674,29 @@ async function init() {
   $('search-input').addEventListener('input', (event) => {
     state.searchQuery = event.target.value;
     renderGames();
+  });
+
+  // 起動モーダル
+  $('launch-form').addEventListener('submit', (event) => {
+    if (event.submitter?.value === 'launch') {
+      event.preventDefault();
+      $('launch-modal').close();
+      launchGame();
+    }
+  });
+  // ストリームビュー
+  $('stream-stop-btn').addEventListener('click', exitStreamView);
+  $('stream-cancel-btn').addEventListener('click', async () => {
+    if ($('stream-cancel-btn').onclick) {
+      await $('stream-cancel-btn').onclick();
+      return;
+    }
+    await exitStreamView();
+  });
+  $('stream-fullscreen-btn').addEventListener('click', () => {
+    const shell = document.querySelector('.stream-shell');
+    if (document.fullscreenElement) document.exitFullscreen();
+    else shell.requestFullscreen?.();
   });
 
   await loadProviders();

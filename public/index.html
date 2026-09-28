@@ -130,7 +130,81 @@
         <p id="library-status" class="muted"></p>
       </div>
     </section>
+
+    <!-- ストリームビュー(Phase 2A: 映像受信) -->
+    <section id="view-stream" class="view hidden">
+      <div class="stream-shell">
+        <video id="stream-video" autoplay playsinline></video>
+        <div id="stream-overlay" class="stream-overlay">
+          <div id="stream-status-card" class="stream-status-card">
+            <div class="spinner"></div>
+            <p id="stream-status-text">セッションを準備中…</p>
+            <p id="stream-status-detail" class="muted"></p>
+            <button id="stream-cancel-btn" class="btn ghost" type="button">キャンセル</button>
+          </div>
+          <div id="stream-stats" class="stream-stats hidden"></div>
+        </div>
+        <div class="stream-toolbar">
+          <span id="stream-game-title"></span>
+          <span id="stream-session-meta" class="muted"></span>
+          <span class="spacer"></span>
+          <button id="stream-fullscreen-btn" class="btn small ghost" type="button">全画面</button>
+          <button id="stream-stop-btn" class="btn small danger" type="button">セッション終了</button>
+        </div>
+        <div id="stream-log" class="stream-log hidden"></div>
+      </div>
+    </section>
   </main>
+
+  <!-- 起動設定モーダル -->
+  <dialog id="launch-modal">
+    <form method="dialog" id="launch-form">
+      <h2 id="launch-title">ゲームを起動</h2>
+      <div class="launch-grid">
+        <label>解像度
+          <select id="launch-resolution">
+            <option value="1280x720">720p</option>
+            <option value="1920x1080" selected>1080p</option>
+            <option value="2560x1440">1440p</option>
+          </select>
+        </label>
+        <label>フレームレート
+          <select id="launch-fps">
+            <option value="30">30 fps</option>
+            <option value="60" selected>60 fps</option>
+          </select>
+        </label>
+        <label>最大ビットレート
+          <select id="launch-bitrate">
+            <option value="20">20 Mbps</option>
+            <option value="40" selected>40 Mbps</option>
+            <option value="60">60 Mbps</option>
+            <option value="75">75 Mbps</option>
+          </select>
+        </label>
+        <label>キーボード配列
+          <select id="launch-keyboard">
+            <option value="en-US" selected>英語 (en-US)</option>
+            <option value="ja-JP">日本語 (ja-JP)</option>
+          </select>
+        </label>
+        <label>ゲーム内言語
+          <select id="launch-language">
+            <option value="en_US" selected>English (en_US)</option>
+            <option value="ja_JP">日本語 (ja_JP)</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted launch-note">
+        Phase 2A: 映像受信までのMVPです。入力(キー/マウス/パッド)は未実装のため、
+        操作確認・AFK回避はできません。コーデックは互換性重視でH264固定です。
+      </p>
+      <div class="launch-actions">
+        <button value="cancel" class="btn ghost" type="submit">キャンセル</button>
+        <button id="launch-confirm-btn" value="launch" class="btn primary" type="submit">起動</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -145,7 +219,7 @@
         <p class="game-meta muted"></p>
         <div class="game-badges"></div>
         <div class="game-actions">
-          <button class="btn small launch-btn" type="button" disabled title="Phase 2 で実装">起動 (Phase 2)</button>
+          <button class="btn small primary launch-btn" type="button">起動</button>
           <span class="launch-id muted"></span>
         </div>
       </div>
