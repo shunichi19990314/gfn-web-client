@@ -3,6 +3,9 @@
 OpenNOW(MIT)解析に基づく **GeForce NOW 非公式WebクライアントのMVP**。
 設計書: [`docs/OpenNOW風サイトをRenderで作る設計書.md`](docs/OpenNOW風サイトをRenderで作る設計書.md) / エンドポイント一覧: [`docs/Phase0_GFNエンドポイント一覧.md`](docs/Phase0_GFNエンドポイント一覧.md)
 
+> **動作実績(2026-09-28)**: 実アカウントでのログイン → ライブラリのゲームタイトル表示まで成功。
+> デバイスフロー認証・GraphQLライブラリ・MES購読・アートワークCDNの現行有効性を実機確認済み。
+
 Phase 1 のスコープ:
 
 - ✅ NVIDIA ID **デバイスフロー認証**のプロキシ — **QRコード** / **コード手入力**(スマートフォン不要)の2方式

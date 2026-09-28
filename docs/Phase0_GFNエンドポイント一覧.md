@@ -512,6 +512,14 @@ settings.{get,set,reset} / media.* / diagnostics.* / updater.* / core.hello
 
 ## 14. Phase 0 残検証チェックリスト(実機確認が必要)
 
+> **検証ログ 2026-09-28**: `gfn-web-mvp`(Phase 1 MVP)を実アカウントでデプロイし、
+> **ログイン→ゲームタイトル表示まで成功**。これにより以下が実証された:
+> デバイスフロー一式(authorize→poll→token交換→client_token/userinfo)、
+> `v2/serverInfo`(vpcId解決)、GraphQL `GetLibraryApps`(インラインPOST+cursor)、
+> `appToGame` マッピング、img.nvidiagrid.net アートワーク表示、MES購読情報、
+> `nv-client-version: 2.0.87.131` / `GFNJWT` 認証ヘッダの現行有効性。
+> 未検証は **NVSTシグナリング(Phase 2)** と persisted query ハッシュ(ストア装飾系)のみ。
+
 - [ ] **NVST WSSのOrigin検査**: ブラウザ(自サイトOrigin)から `wss://{serverIp}/nvst/sign_in` に直接接続できるか。
       拒否されるならRenderにWSリレー(ブラウザWS↔サーバーWS、ヘッダ差し替え)を実装
 - [x] **デバイスフロー現行性**: ✅ 2026-09-28 に Phase 1 MVP(`gfn-web-mvp/`)で実機確認済み。
