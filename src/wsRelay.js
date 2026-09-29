@@ -152,8 +152,8 @@ async function relay(clientWs, active, log) {
     }
   });
   upstream.on('close', (code, reason) => {
-    log.info?.({ sessionId: active.sessionId, code }, 'NVST signaling upstream closed');
-    closeAll(1000, reason?.toString?.() || 'upstream closed');
+    log.info?.({ sessionId: active.sessionId, code, reason: reason?.toString?.() }, 'NVST signaling upstream closed');
+    closeAll(1000, reason?.toString?.() || `upstream closed (code ${code})`);
   });
   upstream.on('error', (error) => {
     log.warn?.({ err: error?.message }, 'NVST signaling upstream error');

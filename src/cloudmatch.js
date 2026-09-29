@@ -736,30 +736,51 @@ export async function createSession({ appId, params = {}, settings = {}, token, 
   const url = new URL('v2/session', base.href);
   url.searchParams.set('keyboardLayout', keyboardLayout);
   url.searchParams.set('languageCode', language);
-  const body = buildCreateBody({ appId, params, settings, deviceHashId });
   const clientId = randomUUID(); // Electron: セッション単位で安定した clientId
   const headers = cloudmatchHeaders(token, deviceHashId, { clientId, includeOrigin: true });
-  const result = await fetchJson(url, { method: 'POST', headers, body: JSON.stringify(body) });
-
-  // セッション競合(既存セッションあり)
-  if (result.status !== 401 && isSessionConflict(result.payload)) {
-    const others = [
-      ...(Array.isArray(result.payload?.otherUserSessions) ? result.payload.otherUserSessions : []),
-      ...(result.payload?.session ? [result.payload.session] : []),
-    ]
-      .map((session) => remoteSessionInfo(session, base))
-      .filter((s) => s.sessionId && s.appId && Number(s.appId) > 0 && s.serverIp && trustedLearnedServerBase(s.serverIp))
-      .slice(0, 32);
-    throw new SessionConflictError(others);
-  }
-  const payload = validateCloudmatchResponse('Session creation failed', result.status, result.payload, {});
   const zone = params.zone ?? base.hostname;
-  const info = sessionInfo(payload, { fallbackBase: base.href, zone, fallbackAppId: appId, deviceId: deviceHashId });
-  info.keyboardLayout = keyboardLayout;
-  info.clientId = clientId;
-  if (!info.negotiatedStreamProfile.codec) {
-    info.negotiatedStreamProfile.codec = codecFromWire(body.sessionRequestData.requestedStreamingFeatures.codec);
-    info.negotiatedStreamProfile.codecSource = 'request';
+
+  // CloudMatchは既存セッションがある場合、要求と異なるappIdのセッションを
+  // 「静かに再利用」して返すことがある(2026-09-29実測: 103500271要求→102241311応答)。
+  // その場合は古いセッションを破棄して1回だけ再作成する。
+  let info = null;
+  let body = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    body = buildCreateBody({ appId, params, settings, deviceHashId });
+    const result = await fetchJson(url, { method: 'POST', headers, body: JSON.stringify(body) });
+
+    // セッション競合(明示的な競合応答)
+    if (result.status !== 401 && isSessionConflict(result.payload)) {
+      const others = [
+        ...(Array.isArray(result.payload?.otherUserSessions) ? result.payload.otherUserSessions : []),
+        ...(result.payload?.session ? [result.payload.session] : []),
+      ]
+        .map((session) => remoteSessionInfo(session, base))
+        .filter((s) => s.sessionId && s.appId && Number(s.appId) > 0 && s.serverIp && trustedLearnedServerBase(s.serverIp))
+        .slice(0, 32);
+      throw new SessionConflictError(others);
+    }
+    const payload = validateCloudmatchResponse('Session creation failed', result.status, result.payload, {});
+    info = sessionInfo(payload, { fallbackBase: base.href, zone, fallbackAppId: appId, deviceId: deviceHashId });
+    info.keyboardLayout = keyboardLayout;
+    info.clientId = clientId;
+    if (!info.negotiatedStreamProfile.codec) {
+      info.negotiatedStreamProfile.codec = codecFromWire(body.sessionRequestData.requestedStreamingFeatures.codec);
+      info.negotiatedStreamProfile.codecSource = 'request';
+    }
+    if (attempt === 0 && String(info.appId) !== String(Number(appId))) {
+      // 別ゲームのセッションが返された → 破棄して再作成
+      try {
+        await fetchJson(new URL(`v2/session/${info.sessionId}`, base.href), { method: 'DELETE', headers });
+      } catch {
+        /* 破棄失敗でも再作成は試行 */
+      }
+      continue;
+    }
+    break;
+  }
+  if (String(info.appId) !== String(Number(appId))) {
+    info.reusedStaleSession = true; // フロントで警告表示用
   }
   // 注意: Rustネイティブ版にあった「作成直後の互換RESUME PUT」はWebセッションでは送らない
   // (Electron版createにも存在せず、Webセッションの状態機械を乱す可能性があるため)

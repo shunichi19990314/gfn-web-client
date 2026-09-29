@@ -4,6 +4,7 @@
 import {
   extractIceCredentials,
   extractNegotiatedVideoCodec,
+  extractPublicIp,
   fixServerIp,
   mungeAnswerSdp,
   parseRiInputCapabilities,
@@ -108,8 +109,15 @@ export class GfnStream {
       this.#setStats({ connectionState: pc.connectionState });
       this.#callbacks.onState?.(pc.connectionState);
       if (['failed', 'closed', 'disconnected'].includes(pc.connectionState) && !this.#disposed) {
-        this.#callbacks.onError?.(`PeerConnection ${pc.connectionState}`);
+        this.#callbacks.onError?.(
+          pc.iceConnectionState === 'failed'
+            ? 'ICE接続の確立に失敗(サーバー候補に到達できず)。TURN未提供/NAT制限/リージョン遠隔が疑われます。診断情報を確認し、別リージョンで再試行してください'
+            : `PeerConnection ${pc.connectionState}`,
+        );
       }
+    };
+    pc.oniceconnectionstatechange = () => {
+      this.log(`ICE: ${pc.iceConnectionState}`);
     };
 
     pc.ontrack = (event) => {
@@ -185,15 +193,33 @@ export class GfnStream {
     this.log(`OFFER received (${offerSdp.length} chars)`);
     this.#setStats({ phase: 'offer' });
 
-    // 1) CloudMatchのWebRTCメディアエンドポイント(usage 2/17)で候補アドレスを補正(公式準拠)
+    // 1) サーバー候補アドレスの補正
+    //   優先: mediaConnectionInfo(usage 2/17)。
+    //   フォールバック: 2026年現在の応答では usage 2/17 も iceServerConfiguration も
+    //   欠落することがある(実測)。その場合は session.serverIp(ダッシュ形式ホスト→IP)で
+    //   0.0.0.0 候補を書き換える。怠るとICEが 0.0.0.0 宛になり永遠に接続できず、
+    //   サーバーがタイムアウトでシグナリングを切断する(2026-09-29 実障害)。
     let processedOffer = offerSdp;
-    if (this.#remoteIceEndpoint?.ip) {
-      processedOffer = fixServerIp(processedOffer, this.#remoteIceEndpoint.ip);
-      const rewritten = rewriteSdpIceCandidateEndpoints(processedOffer, this.#remoteIceEndpoint);
-      if (rewritten.replacements > 0) {
-        processedOffer = rewritten.sdp;
-        this.log(`Rewrote ${rewritten.replacements} server ICE endpoint(s) to mediaConnectionInfo`);
+    const rewriteIp = this.#remoteIceEndpoint?.ip ?? this.#session.serverIp ?? null;
+    if (rewriteIp) {
+      const zeroBefore = (processedOffer.match(/0\.0\.0\.0/g) ?? []).length;
+      processedOffer = fixServerIp(processedOffer, rewriteIp);
+      if (this.#remoteIceEndpoint?.ip) {
+        const rewritten = rewriteSdpIceCandidateEndpoints(processedOffer, this.#remoteIceEndpoint);
+        if (rewritten.replacements > 0) {
+          processedOffer = rewritten.sdp;
+          this.log(`Rewrote ${rewritten.replacements} server ICE endpoint(s) to mediaConnectionInfo`);
+        }
+      } else {
+        const zeroAfter = (processedOffer.match(/0\.0\.0\.0/g) ?? []).length;
+        this.log(`offer 0.0.0.0 candidates: ${zeroBefore} → ${zeroAfter} (rewritten via serverIp=${extractPublicIp(rewriteIp) ?? rewriteIp})`);
       }
+    } else {
+      this.log('WARNING: no mediaConnectionInfo and no serverIp — cannot rewrite 0.0.0.0 candidates');
+    }
+    // 診断: offer の candidate 行をログ(ICEトラブルの一次情報)
+    for (const line of processedOffer.split(/\r?\n/)) {
+      if (line.startsWith('a=candidate:')) this.log(`offer candidate: ${line.slice(0, 110)}`);
     }
 
     // 2) offerからRI入力能力をパース(nvstSdpにエコーバックする)
@@ -205,14 +231,17 @@ export class GfnStream {
       this.#riCapabilities.partialReliableThresholdMs = DEFAULT_PARTIAL_RELIABLE_THRESHOLD_MS;
     }
 
-    // 3) H264優先(2A。HEVC/AV1は Phase 2B の設定UIで)
-    preferH264(pc);
-
     await pc.setRemoteDescription({ type: 'offer', sdp: processedOffer });
     this.log('Remote description set');
     for (const queued of this.#queuedRemoteIce.splice(0)) {
       await this.#addRemoteIce(queued).catch(() => {});
     }
+
+    // 3) H264優先 — setRemoteDescription「後」に実行すること。
+    //    transceiver は offer 適用時に生成されるため、前に呼ぶと no-op になり
+    //    サーバー提示順(例: AV1)で交渉されてしまう(2026-09-29 実障害)
+    const h264Applied = preferH264(pc);
+    this.log(`H264 codec preference applied: ${h264Applied}`);
 
     const answer = await pc.createAnswer();
     answer.sdp = mungeAnswerSdp(answer.sdp, this.#settings.maxBitrateKbps);

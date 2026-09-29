@@ -399,3 +399,92 @@ test('pollSession: 全候補基が404 → status 404 のエラー(routesがsessi
   assert.ok(hits.some((h) => h.includes('np-bom-01')));
   assert.ok(hits.some((h) => h.includes('us-oregon')));
 });
+
+// ---- 静かなセッション再利用(appId不一致)の検出と再作成 ----
+
+function sessionPayloadWithApp(appId, sessionId) {
+  return {
+    requestStatus: { statusCode: 1 },
+    session: {
+      sessionId,
+      status: 2,
+      connectionInfo: [],
+      sessionRequestData: {
+        appId,
+        clientRequestMonitorSettings: [{ widthInPixels: 1920, heightInPixels: 1080, framesPerSecond: 60 }],
+        requestedStreamingFeatures: { codec: 1 },
+      },
+    },
+  };
+}
+
+test('createSession: 要求と異なるappIdのセッションが返ったら破棄して再作成', async (t) => {
+  const { createSession } = await import('../src/cloudmatch.js');
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const calls = [];
+  let postCount = 0;
+  globalThis.fetch = async (url, options) => {
+    const u = String(url);
+    calls.push(`${options?.method ?? 'GET'} ${u}`);
+    if (u.includes('/v2/session?') && (options?.method === 'POST' || !options?.method)) {
+      postCount += 1;
+      return postCount === 1
+        ? jsonResponseLike(sessionPayloadWithApp(111, 'stale-1'))
+        : jsonResponseLike(sessionPayloadWithApp(999, 'fresh-1'));
+    }
+    if (u.includes('/v2/session/stale-1') && options?.method === 'DELETE') {
+      return jsonResponseLike({ requestStatus: { statusCode: 1 }, session: { sessionId: 'stale-1', status: 6 } });
+    }
+    throw new Error('unexpected fetch: ' + u);
+  };
+  function jsonResponseLike(payload) {
+    return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) };
+  }
+  const { info } = await createSession({
+    appId: '999',
+    settings: {},
+    token: 'jwt',
+    deviceHashId: 'dev',
+    providerBase: 'https://us-oregon.cloudmatchbeta.nvidiagrid.net/',
+  });
+  assert.equal(info.appId, '999');
+  assert.equal(info.sessionId, 'fresh-1');
+  assert.notEqual(info.reusedStaleSession, true);
+  assert.equal(postCount, 2);
+  assert.ok(calls.some((c) => c.startsWith('DELETE')));
+});
+
+test('createSession: 再作成後も不一致なら reusedStaleSession フラグ', async (t) => {
+  const { createSession } = await import('../src/cloudmatch.js');
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  globalThis.fetch = async (url, options) => {
+    const u = String(url);
+    const payload = {
+      requestStatus: { statusCode: 1 },
+      session: {
+        sessionId: 'stale-x', status: 2, connectionInfo: [],
+        sessionRequestData: { appId: 111, clientRequestMonitorSettings: [{}], requestedStreamingFeatures: {} },
+      },
+    };
+    if (options?.method === 'DELETE') return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) };
+    return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) };
+  };
+  const { info } = await createSession({
+    appId: '999', settings: {}, token: 'jwt', deviceHashId: 'dev',
+    providerBase: 'https://us-oregon.cloudmatchbeta.nvidiagrid.net/',
+  });
+  assert.equal(info.reusedStaleSession, true);
+});
+
+// ---- SDP候補書き換え(フロントエンド純関数) ----
+
+test('fixServerIp: ダッシュ形式ホスト名→IP変換で0.0.0.0候補を書き換え', async () => {
+  const { fixServerIp, extractPublicIp } = await import('../public/js/sdpUtils.js');
+  assert.equal(extractPublicIp('66-22-139-37.cloudmatchbeta.nvidiagrid.net'), '66.22.139.37');
+  const sdp = 'v=0\r\na=candidate:1 1 udp 2130706431 0.0.0.0 50000 typ host\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n';
+  const fixed = fixServerIp(sdp, '66-22-139-37.cloudmatchbeta.nvidiagrid.net');
+  assert.match(fixed, /a=candidate:1 1 udp 2130706431 66\.22\.139\.37 50000 typ host/);
+  assert.equal((fixed.match(/0\.0\.0\.0/g) ?? []).length, 0);
+});
