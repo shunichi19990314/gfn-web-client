@@ -142,3 +142,91 @@ test('壊れたJSON body は 400(500にしない)', async (t) => {
   });
   assert.equal(res.statusCode, 400, `body: ${res.body}`);
 });
+
+// ---- start のゾンビセッション生存確認(v0.5.9) ----
+
+function activeStateFixture() {
+  return {
+    sessionId: 'old-1',
+    controlBase: 'https://us-oregon.cloudmatchbeta.nvidiagrid.net',
+    requestedBase: 'https://us-oregon.cloudmatchbeta.nvidiagrid.net/',
+    pollBase: 'https://us-oregon.cloudmatchbeta.nvidiagrid.net/',
+    serverIp: null,
+    zone: 'us-oregon.cloudmatchbeta.nvidiagrid.net',
+    appId: '111',
+    info: { sessionId: 'old-1', status: 2 },
+  };
+}
+
+function seededSessionWithRegion() {
+  return store.saveSession({
+    provider: { idpId: 'x', code: 'NVIDIA', displayName: 'NVIDIA', streamingServiceUrl: 'https://us-oregon.cloudmatchbeta.nvidiagrid.net/', priority: 0 },
+    tokens: { accessToken: 'at', idToken: 'it', refreshToken: null, clientToken: null, expiresAt: Date.now() + 3600e3, authClientId: 'c' },
+    user: { userId: 'u1', displayName: 't', email: null, avatarUrl: null, membershipTier: 'FREE' },
+    deviceHashId: 'dev-1',
+  });
+}
+
+test('start: 上流で失効したゾンビactive状態は自動解放され、新規作成が進む(201)', async (t) => {
+  const app = await buildApp({ logger: false });
+  t.after(() => app.close());
+  const sid = seededSessionWithRegion();
+  store.setActiveSession(sid, activeStateFixture());
+  const calls = [];
+  mockFetch(t, async (url, options) => {
+    const u = String(url);
+    calls.push(`${options?.method ?? 'GET'} ${u}`);
+    if (u.includes('/v2/session/old-1')) {
+      return jsonResponse({ requestStatus: { statusCode: 22, statusDescription: 'INVALID_SESSION_ID_NOT_FOUND_STATUS' } }, 404);
+    }
+    if (u.endsWith('/v2/session') && (!options?.method || options.method === 'GET')) {
+      return jsonResponse({ requestStatus: { statusCode: 1 }, sessions: [] }); // cleanup用リスト
+    }
+    if (u.includes('/v2/session?') && options?.method === 'POST') {
+      return jsonResponse({
+        requestStatus: { statusCode: 1 },
+        session: {
+          sessionId: 'new-1', status: 1, connectionInfo: [],
+          sessionRequestData: { appId: 555, clientRequestMonitorSettings: [{}], requestedStreamingFeatures: {} },
+        },
+      });
+    }
+    throw new Error('unexpected ' + u);
+  });
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/session/start',
+    headers: { 'content-type': 'application/json' },
+    payload: { appId: '555', title: 'T', settings: {} },
+    cookies: { gfnweb_sid: sid },
+  });
+  assert.equal(res.statusCode, 201, `body: ${res.body}`);
+  assert.equal(res.json().session.sessionId, 'new-1');
+  assert.equal(store.getActiveSession(sid).sessionId, 'new-1');
+});
+
+test('start: 生存しているactive状態があれば409を維持', async (t) => {
+  const app = await buildApp({ logger: false });
+  t.after(() => app.close());
+  const sid = seededSessionWithRegion();
+  store.setActiveSession(sid, activeStateFixture());
+  mockFetch(t, async (url) => {
+    const u = String(url);
+    if (u.includes('/v2/session/old-1')) {
+      return jsonResponse({
+        requestStatus: { statusCode: 1 },
+        session: { sessionId: 'old-1', status: 2, connectionInfo: [], sessionRequestData: { appId: 111, clientRequestMonitorSettings: [{}], requestedStreamingFeatures: {} } },
+      });
+    }
+    throw new Error('unexpected ' + u);
+  });
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/session/start',
+    headers: { 'content-type': 'application/json' },
+    payload: { appId: '555', settings: {} },
+    cookies: { gfnweb_sid: sid },
+  });
+  assert.equal(res.statusCode, 409, `body: ${res.body}`);
+  assert.equal(res.json().error, 'session_conflict');
+});

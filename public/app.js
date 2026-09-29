@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.8-ui2';
+export const APP_VERSION = 'v0.5.9-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -82,6 +82,7 @@ const state = {
   loginAttempt: null, // { attemptId, deviceCode, intervalMs, expiresAt, timer, countdownTimer }
   launchGame: null, // 起動対象のゲーム
   launchRetryCount: 0, // queue_abandoned等の自動再試行回数
+  sessionGoneRetry: 0, // session_gone からの自動再作成回数(起動1回につき最大1)
   regionsForLaunch: null, // /api/regions のキャッシュ
   stream: null, // { gfnStream, signaling, pollTimer, sessionInfo, startedAt }
   adRuntime: null, // { adId, index, lastAction, startedAtMs, wasPaused, startWatchdog, stuckWatchdog, lastProgressTs, reportedFinish }
@@ -694,6 +695,7 @@ async function measureRegionLatency() {
 function openLaunchModal(game) {
   state.launchGame = game;
   state.launchRetryCount = 0;
+  state.sessionGoneRetry = 0;
   $('launch-title').textContent = `${game.title} を起動`;
   $('region-ping-status').textContent = '';
   populateRegionSelect();
@@ -917,6 +919,20 @@ function startSessionPolling() {
       ({ session: info } = await api('/api/session/poll', {}, 15000));
     } catch (error) {
       if (error.code === 'session_gone') {
+        const goneRetry = state.sessionGoneRetry ?? 0;
+        const game = state.launchGame;
+        if (game && goneRetry < 1) {
+          // 起動直後の失効(ゾンビ復帰/即時破棄)→ 新しいセッションを1回だけ自動再作成
+          state.sessionGoneRetry = goneRetry + 1;
+          streamLog(`poll: session_gone → 自動再作成 #${state.sessionGoneRetry}`);
+          try { setStreamStatus('セッションが失効しました — 自動的に作り直します…', '新しいセッションを作成中'); } catch { /* ignore */ }
+          try { await api('/api/session/stop', { method: 'POST' }); } catch { /* ignore */ }
+          if (state.stream?.pollTimer) clearTimeout(state.stream.pollTimer);
+          try { state.stream?.gfnStream?.dispose(); } catch { /* ignore */ }
+          state.stream = null;
+          launchGame(game);
+          return;
+        }
         streamLog('poll: session_gone — サーバー側でセッション失効。ライブラリに戻ります');
         showToast('セッションがサーバー側で失効しました。もう一度起動してください。', 8000);
         await exitStreamView();

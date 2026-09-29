@@ -322,11 +322,33 @@ export async function registerRoutes(app) {
     }
     const existing = store.getActiveSession(session.sid);
     if (existing) {
-      return reply.code(409).send({
-        error: 'session_conflict',
-        message: 'A session is already active on this browser tab.',
-        session: existing.info,
-      });
+      // ローカルにアクティブ状態が残っていても、上流で既に失効している
+      // (ゾンビ)可能性がある。1回だけ生存確認し、死んでいれば自動解放して
+      // 新規作成へ進む(セルフヒーリング — 409/復帰ループの根絶)
+      let stale = false;
+      try {
+        await pollSession({
+          state: existing,
+          token: sessionToken(session.tokens),
+          deviceHashId: session.deviceHashId,
+        });
+      } catch (error) {
+        if (error?.status === 404) {
+          stale = true;
+        } else {
+          request.log.warn({ err: error?.message }, 'liveness probe inconclusive; treating as alive');
+        }
+      }
+      if (stale) {
+        store.clearActiveSession(session.sid);
+        request.log.info({ sessionId: existing.sessionId }, 'stale local session cleared on start');
+      } else {
+        return reply.code(409).send({
+          error: 'session_conflict',
+          message: 'A session is already active on this browser tab.',
+          session: existing.info,
+        });
+      }
     }
     const { info, base, zone, clientId, cleanedUp } = await createSession({
       appId: String(appId),
