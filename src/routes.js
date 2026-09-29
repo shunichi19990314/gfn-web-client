@@ -59,9 +59,10 @@ async function requireSession(request, reply) {
     return null;
   }
   const record = store.getSession(sid);
-  if (!record) {
+  if (!record || !record.tokens || typeof record.tokens !== 'object' || !record.user) {
+    if (record) store.deleteSession(sid); // 壊れたレコードは破棄
     reply.clearCookie(COOKIE_NAME, { path: '/' });
-    reply.code(401).send({ error: 'authentication_required', message: 'Session expired. Sign in again.' });
+    reply.code(401).send({ error: 'authentication_required', message: 'Session expired or corrupted. Sign in again.' });
     return null;
   }
   // access_token のリフレッシュ(gfn.rs:756-800相当の簡易版)
@@ -412,10 +413,13 @@ export async function registerRoutes(app) {
         deviceHashId: session.deviceHashId,
       });
     } catch (error) {
-      // 上流で停止できなくても、ローカル状態は必ず解放する(ゾンビ競合の防止)
-      upstreamError = error.message;
+      // 上流で停止できなくても(内部例外でも)、ローカル状態は必ず解放する
+      upstreamError = `${error?.name ?? 'Error'}: ${error?.message ?? error}`;
+      request.log.warn({ err: error, sessionId: active.sessionId }, 'stop failed; clearing local state anyway');
     }
-    store.clearActiveSession(session.sid);
+    try {
+      store.clearActiveSession(session.sid);
+    } catch { /* ignore */ }
     request.log.info({ sessionId: active.sessionId, stopped: result.stopped }, 'CloudMatch session stopped');
     return { session: null, stopped: result.stopped, sessionId: active.sessionId, upstreamError };
   });
@@ -544,7 +548,10 @@ export function upstreamErrorHandler(error, request, reply) {
     return reply.code(429).send({ error: 'rate_limited', message: error.message });
   }
   request.log.error({ err: error }, 'unhandled error');
-  return reply.code(500).send({ error: 'internal_error', message: 'Internal server error' });
+  return reply.code(500).send({
+    error: 'internal_error',
+    message: `Internal server error (${error?.name ?? 'unknown'}: ${String(error?.message ?? '').slice(0, 120)})`,
+  });
 }
 
 // テスト用エクスポート
