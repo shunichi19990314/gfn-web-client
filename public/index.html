@@ -3,16 +3,28 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>GFN Web MVP — Phase 1</title>
-  <link rel="stylesheet" href="/styles.css?v=4" />
+  <title>GFN Web Client</title>
+  <link rel="stylesheet" href="/styles.css?v=5" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>" />
 </head>
 <body>
+  <!-- 古いキャッシュ検出バナー(app.jsがバージョン不一致を検出したら表示) -->
+  <div id="stale-banner" class="stale-banner hidden">
+    <strong>⚠ ブラウザが古いコードを実行しています。</strong>
+    <span id="stale-banner-detail"></span>
+    <button id="stale-reload-btn" class="btn small" type="button">今すぐ再読み込み</button>
+  </div>
+
   <header class="topbar">
     <div class="brand">
-      <span class="logo">▶</span>
-      <span class="name">GFN Web <em>MVP</em></span>
-      <span class="phase">Phase 1 — Auth + Library</span>
+      <span class="logo-mark">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+      </span>
+      <span class="brand-text">
+        <span class="name">GFN <em>Web</em></span>
+        <span class="phase" id="phase-label">Phase 2A — Auth / Library / Video</span>
+      </span>
+      <span class="version-badge" id="version-badge" title="フロントエンドのバージョン。/healthz のバージョンと一致しない場合は古いキャッシュです">—</span>
     </div>
     <div id="user-chip" class="user-chip hidden">
       <img id="user-avatar" alt="" />
@@ -25,100 +37,120 @@
   </header>
 
   <main>
-    <!-- ログインビュー -->
+    <!-- ============ ログインビュー ============ -->
     <section id="view-login" class="view hidden">
-      <div class="card login-card">
-        <h1>GeForce NOW にサインイン</h1>
-        <p class="muted">
-          NVIDIA ID のデバイスフロー認証を使用します。
-          パスワードはこのサーバーを一切通過しません。
-        </p>
-
-        <div id="login-idle">
-          <div class="tabs" role="tablist">
-            <button id="tab-qr" class="tab active" type="button" role="tab">QRコード</button>
-            <button id="tab-code" class="tab" type="button" role="tab">コードを手入力</button>
+      <div class="login-hero">
+        <div class="login-glow" aria-hidden="true"></div>
+        <div class="card login-card">
+          <div class="login-head">
+            <h1>GeForce NOW にサインイン</h1>
+            <p class="muted">
+              NVIDIA ID のデバイスフロー認証を使用します。パスワードはこのサーバーを一切通過しません。
+            </p>
           </div>
-          <p id="tab-hint" class="muted tab-hint"></p>
 
-          <div class="field">
-            <label for="provider-select">ログインプロバイダ</label>
-            <select id="provider-select"></select>
-          </div>
-          <button id="start-login-btn" class="btn primary" type="button">サインインを開始</button>
+          <div id="login-idle">
+            <div class="tabs" role="tablist">
+              <button id="tab-qr" class="tab active" type="button" role="tab">
+                <span class="tab-icon">▣</span> QRコード
+              </button>
+              <button id="tab-code" class="tab" type="button" role="tab">
+                <span class="tab-icon">⌨</span> コードを手入力
+              </button>
+            </div>
+            <p id="tab-hint" class="muted tab-hint"></p>
 
-          <details id="import-details">
-            <summary>公式Webクライアントからトークンをインポート(上級者向け)</summary>
-            <div class="import-body">
-              <p class="muted import-steps">
-                QRもコード入力も使えない場合の最終手段です。<br />
-                ① 公式 <a href="https://play.geforcenow.com" target="_blank" rel="noreferrer">play.geforcenow.com</a> を開き、NVIDIA IDでログインする<br />
-                ② F12(開発者ツール)→「Application / ストレージ」→ Local Storage → <code>https://play.geforcenow.com</code><br />
-                ③ <code>eyJ</code> で始まる長い値(JWT。idToken / accessToken 等のキー)をコピーする<br />
-                ④ 下に貼り付けて「インポート」を押す
-              </p>
-              <textarea id="import-token" rows="3" placeholder="eyJhbGciOiJSUzI1NiIs…" spellcheck="false"></textarea>
-              <div class="import-actions">
-                <button id="import-btn" class="btn" type="button">インポート</button>
-                <span id="import-status" class="status-line"></span>
+            <div class="field">
+              <label for="provider-select">ログインプロバイダ</label>
+              <select id="provider-select"></select>
+            </div>
+            <button id="start-login-btn" class="btn primary btn-block" type="button">サインインを開始</button>
+
+            <details id="import-details">
+              <summary>公式Webクライアントからトークンをインポート(上級者向け)</summary>
+              <div class="import-body">
+                <p class="muted import-steps">
+                  QRもコード入力も使えない場合の最終手段です。<br />
+                  ① 公式 <a href="https://play.geforcenow.com" target="_blank" rel="noreferrer">play.geforcenow.com</a> を開き、NVIDIA IDでログインする<br />
+                  ② F12(開発者ツール)→「Application / ストレージ」→ Local Storage → <code>https://play.geforcenow.com</code><br />
+                  ③ <code>eyJ</code> で始まる長い値(JWT。idToken / accessToken 等のキー)をコピーする<br />
+                  ④ 下に貼り付けて「インポート」を押す
+                </p>
+                <textarea id="import-token" rows="3" placeholder="eyJhbGciOiJSUzI1NiIs…" spellcheck="false"></textarea>
+                <div class="import-actions">
+                  <button id="import-btn" class="btn" type="button">インポート</button>
+                  <span id="import-status" class="status-line"></span>
+                </div>
+                <p class="legal muted">
+                  ⚠ このトークンはアカウント資格情報と同等の権限を持ちます。
+                  自分で運用している、または信頼できるサーバー以外では絶対に使用しないでください。
+                  インポートしたセッションは自動更新ができず、トークン失効時に再インポートが必要です。
+                </p>
               </div>
-              <p class="legal muted">
-                ⚠ このトークンはアカウント資格情報と同等の権限を持ちます。
-                自分で運用している、または信頼できるサーバー以外では絶対に使用しないでください。
-                インポートしたセッションは自動更新ができず、トークン失効時に再インポートが必要です。
-              </p>
-            </div>
-          </details>
+            </details>
 
-          <p class="legal muted">
-            非公式クライアントです。NVIDIA / GeForce NOW とは無関係であり、
-            NVIDIA の利用規約に抵触する可能性があります。自己責任でご利用ください。
-          </p>
-        </div>
-
-        <div id="login-pending" class="hidden">
-          <!-- QRモード -->
-          <div id="pending-qr" class="qr-wrap">
-            <img id="qr-image" alt="サインインQRコード" />
-            <div class="qr-side">
-              <p>スマートフォンのカメラでQRを読み取ってください。</p>
-              <p class="muted">または同じ端末で <a id="verification-link" href="#" target="_blank" rel="noreferrer">NVIDIAのログインページ</a> を開き、下のコードを入力してもOKです。</p>
-              <p>コード: <strong id="user-code" class="user-code"></strong>
-                <button id="copy-code-btn" class="btn small ghost" type="button">コピー</button></p>
-              <p class="muted">有効期限: <span id="expiry-countdown">—</span></p>
-              <p id="login-status" class="status-line">承認待ち…</p>
-              <button id="cancel-login-btn" class="btn ghost" type="button">キャンセル</button>
-            </div>
+            <p class="legal muted">
+              非公式クライアントです。NVIDIA / GeForce NOW とは無関係であり、
+              NVIDIA の利用規約に抵触する可能性があります。自己責任でご利用ください。
+            </p>
           </div>
-          <!-- 手入力モード -->
-          <div id="pending-code" class="code-wrap hidden">
-            <p>次のページを開き、表示されたコードを入力してNVIDIA IDでログインしてください(Steam/Googleアカウントでのログインもこのページから選択できます)。</p>
-            <div class="code-display">
-              <strong id="user-code-big" class="user-code big"></strong>
-              <button id="copy-code-btn2" class="btn small ghost" type="button">コピー</button>
+
+          <div id="login-pending" class="hidden">
+            <!-- QRモード -->
+            <div id="pending-qr" class="qr-wrap">
+              <img id="qr-image" alt="サインインQRコード" />
+              <div class="qr-side">
+                <p>スマートフォンのカメラでQRを読み取ってください。</p>
+                <p class="muted">または同じ端末で <a id="verification-link" href="#" target="_blank" rel="noreferrer">NVIDIAのログインページ</a> を開き、下のコードを入力してもOKです。</p>
+                <p>コード: <strong id="user-code" class="user-code"></strong>
+                  <button id="copy-code-btn" class="btn small ghost" type="button">コピー</button></p>
+                <p class="muted">有効期限: <span id="expiry-countdown">—</span></p>
+                <p id="login-status" class="status-line">承認待ち…</p>
+                <button id="cancel-login-btn" class="btn ghost" type="button">キャンセル</button>
+              </div>
             </div>
-            <div class="code-actions">
-              <a id="open-pin-page-btn" class="btn primary" href="#" target="_blank" rel="noreferrer">NVIDIAのコード入力ページを開く ↗</a>
+            <!-- 手入力モード -->
+            <div id="pending-code" class="code-wrap hidden">
+              <p>次のページを開き、表示されたコードを入力してNVIDIA IDでログインしてください(Steam/Googleアカウントでのログインもこのページから選択できます)。</p>
+              <div class="code-display">
+                <strong id="user-code-big" class="user-code big"></strong>
+                <button id="copy-code-btn2" class="btn small ghost" type="button">コピー</button>
+              </div>
+              <div class="code-actions">
+                <a id="open-pin-page-btn" class="btn primary" href="#" target="_blank" rel="noreferrer">NVIDIAのコード入力ページを開く ↗</a>
+              </div>
+              <p class="muted">有効期限: <span id="expiry-countdown2">—</span></p>
+              <p id="login-status2" class="status-line">承認待ち…</p>
+              <button id="cancel-login-btn2" class="btn ghost" type="button">キャンセル</button>
             </div>
-            <p class="muted">有効期限: <span id="expiry-countdown2">—</span></p>
-            <p id="login-status2" class="status-line">承認待ち…</p>
-            <button id="cancel-login-btn2" class="btn ghost" type="button">キャンセル</button>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- ライブラリビュー -->
+    <!-- ============ ライブラリビュー ============ -->
     <section id="view-library" class="view hidden">
       <div class="library-head">
         <div class="subscription-panel" id="subscription-panel">
-          <span id="sub-tier">—</span>
-          <span id="sub-time" class="muted"></span>
-          <span id="sub-region" class="muted"></span>
-          <span id="sub-resolutions" class="muted"></span>
+          <div class="sub-item">
+            <span class="sub-label"> membership</span>
+            <span id="sub-tier">—</span>
+          </div>
+          <div class="sub-item">
+            <span class="sub-label">利用時間</span>
+            <span id="sub-time" class="muted">—</span>
+          </div>
+          <div class="sub-item">
+            <span class="sub-label">リージョン</span>
+            <span id="sub-region" class="muted">—</span>
+          </div>
+          <div class="sub-item">
+            <span class="sub-label">解像度権限</span>
+            <span id="sub-resolutions" class="muted">—</span>
+          </div>
         </div>
         <div class="library-controls">
-          <input id="search-input" type="search" placeholder="読み込んだゲームを検索…" autocomplete="off" />
+          <input id="search-input" type="search" placeholder="🔍 読み込んだゲームを検索…" autocomplete="off" />
           <span id="library-count" class="muted"></span>
         </div>
       </div>
@@ -131,8 +163,17 @@
       </div>
     </section>
 
-    <!-- ストリームビュー(Phase 2A: 映像受信) -->
+    <!-- ============ ストリームビュー ============ -->
     <section id="view-stream" class="view hidden">
+      <!-- セッション進行タイムライン -->
+      <ol class="launch-steps" id="launch-steps">
+        <li data-step="1"><span class="step-dot">1</span>セッション作成</li>
+        <li data-step="2"><span class="step-dot">2</span>待機/広告</li>
+        <li data-step="3"><span class="step-dot">3</span>シグナリング</li>
+        <li data-step="4"><span class="step-dot">4</span>WebRTC接続</li>
+        <li data-step="5"><span class="step-dot">5</span>映像</li>
+      </ol>
+
       <div class="stream-shell">
         <video id="stream-video" autoplay playsinline></video>
         <div id="stream-overlay" class="stream-overlay">
@@ -153,18 +194,30 @@
           </div>
           <div id="stream-stats" class="stream-stats hidden"></div>
         </div>
-        <div class="stream-toolbar">
-          <span id="stream-game-title"></span>
-          <span id="stream-session-meta" class="muted"></span>
-          <span class="spacer"></span>
-          <button id="stream-diag-btn" class="btn small ghost" type="button" title="現在のセッション状態とログをクリップボードにコピー">診断情報</button>
-          <button id="stream-fullscreen-btn" class="btn small ghost" type="button">全画面</button>
-          <button id="stream-stop-btn" class="btn small danger" type="button">セッション終了</button>
-        </div>
-        <div id="stream-log" class="stream-log hidden"></div>
       </div>
+
+      <div class="stream-toolbar">
+        <span id="stream-game-title"></span>
+        <span id="stream-session-meta" class="muted"></span>
+        <span class="spacer"></span>
+        <button id="stream-diag-btn" class="btn small ghost" type="button" title="現在のセッション状態とログをクリップボードにコピー">診断情報</button>
+        <button id="stream-fullscreen-btn" class="btn small ghost" type="button">全画面</button>
+        <button id="stream-stop-btn" class="btn small danger" type="button">セッション終了</button>
+      </div>
+
+      <!-- 常設診断パネル(折りたたみ) -->
+      <details id="diag-panel" class="diag-panel">
+        <summary>診断パネル — セッションの生状態とログ(開くと自動更新)</summary>
+        <pre id="diag-json" class="diag-json">{}</pre>
+        <div id="stream-log" class="stream-log"></div>
+      </details>
     </section>
   </main>
+
+  <footer class="site-footer">
+    <span id="footer-version">—</span>
+    <span class="muted">非公式クライアント — NVIDIAとは無関係 / 自己責任でご利用ください</span>
+  </footer>
 
   <!-- 起動設定モーダル -->
   <dialog id="launch-modal">
@@ -232,6 +285,7 @@
       <div class="cover">
         <img loading="lazy" alt="" />
         <span class="tier-tag"></span>
+        <span class="play-glyph">▶</span>
       </div>
       <div class="game-info">
         <h3 class="game-title"></h3>
@@ -245,6 +299,6 @@
     </article>
   </template>
 
-  <script src="/app.js?v=4" type="module"></script>
+  <script src="/app.js?v=5" type="module"></script>
 </body>
 </html>

@@ -5,6 +5,62 @@ import { GfnStream } from './js/stream.js';
 
 const $ = (id) => document.getElementById(id);
 
+// フロントエンドのバージョン。package.json / server /healthz と一致させる。
+// 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
+export const APP_VERSION = 'v0.5.0-ui2';
+
+async function initVersionBadge() {
+  const badge = $('version-badge');
+  const footer = $('footer-version');
+  if (badge) badge.textContent = APP_VERSION;
+  if (footer) footer.textContent = `client ${APP_VERSION}`;
+  try {
+    const health = await fetch('/healthz', { cache: 'no-store' }).then((r) => r.json());
+    if (health?.version) {
+      if (footer) footer.textContent = `client ${APP_VERSION} / server ${health.version}`;
+      if (health.version !== APP_VERSION) {
+        showStaleBanner(`サーバーは ${health.version} を配信していますが、このブラウザは ${APP_VERSION} を実行しています。`);
+        if (badge) badge.classList.add('mismatch');
+      }
+    }
+  } catch { /* healthz取得失敗は無視 */ }
+}
+
+function showStaleBanner(detail) {
+  const banner = $('stale-banner');
+  if (!banner) return;
+  banner.classList.remove('hidden');
+  const el = $('stale-banner-detail');
+  if (el) el.textContent = `${detail} ハードリロード(Ctrl+Shift+R / Cmd+Shift+R)または「今すぐ再読み込み」で解決します。`;
+  const btn = $('stale-reload-btn');
+  if (btn) {
+    btn.onclick = () => {
+      // クエリを付けてHTMLキャッシュを確実に回避
+      location.href = `${location.pathname}?fresh=${Date.now()}${location.hash}`;
+    };
+  }
+}
+
+// セッション進行タイムライン(1=作成 2=待機/広告 3=シグナリング 4=接続 5=映像)
+function setLaunchStep(activeStep) {
+  const steps = document.querySelectorAll('#launch-steps li');
+  for (const li of steps) {
+    const n = Number(li.dataset.step);
+    li.classList.toggle('active', n === activeStep);
+    li.classList.toggle('done', n < activeStep);
+  }
+}
+
+// 診断パネル(折りたたみ開いているときだけJSON更新 — 毎ポーリング)
+function updateDiagPanel(info) {
+  const panel = $('diag-panel');
+  const pre = $('diag-json');
+  if (!panel || !pre || !panel.open) return;
+  try {
+    pre.textContent = JSON.stringify(info, null, 1).slice(0, 20000);
+  } catch { /* ignore */ }
+}
+
 const state = {
   session: null,
   providers: [],
@@ -611,8 +667,8 @@ async function launchGame() {
   if (!game?.launchAppId) return;
   const settings = collectLaunchSettings();
   showView('stream');
+  setLaunchStep(1);
   $('stream-log').innerHTML = '';
-  $('stream-log').classList.remove('hidden');
   $('stream-game-title').textContent = game.title;
   $('stream-session-meta').textContent = '';
   $('stream-stats').classList.add('hidden');
@@ -728,6 +784,8 @@ function startSessionPolling() {
     state.stream.sessionInfo = info;
     // UI更新が例外を投げてもポーリングループは絶対に止めない(自己回復)
     try {
+      if (!info.readyForConnect) setLaunchStep(2);
+      updateDiagPanel(info);
       updateSessionUi(info);
       if (pollCount % 10 === 0) {
         streamLog(`poll #${pollCount}: status=${info.status} phase=${info.phase} seat=${info.seatSetupStep ?? '-'} queue=${info.queuePosition ?? '-'} ads=${info.adState?.isAdsRequired ?? false}`);
@@ -1036,6 +1094,7 @@ async function beginStreaming(info) {
   const stream = state.stream;
   const settings = collectLaunchSettings();
   hideAdOverlay();
+  setLaunchStep(3);
   $('stream-status-card').classList.remove('hidden');
   setStreamStatus('WebRTCシグナリング接続中…', info.signalingUrl);
   const signaling = new NvstSignalingClient(info.sessionId, { resolution: settings.resolution });
@@ -1053,7 +1112,11 @@ async function beginStreaming(info) {
       onLog: streamLog,
       onState: (connectionState) => {
         streamLog(`PeerConnection: ${connectionState}`);
-        if (connectionState === 'connected') setStreamStatus('接続完了。映像を待機中…');
+        if (connectionState === 'connecting') setLaunchStep(4);
+        if (connectionState === 'connected') {
+          setLaunchStep(4);
+          setStreamStatus('接続完了。映像を待機中…');
+        }
       },
       onStats: (stats) => {
         const el = $('stream-stats');
@@ -1077,6 +1140,7 @@ async function beginStreaming(info) {
   stream.signaling = signaling;
   stream.gfnStream = gfnStream;
   $('stream-video').addEventListener('playing', () => {
+    setLaunchStep(5);
     $('stream-status-card').classList.add('hidden');
     const elapsed = Math.round((Date.now() - stream.startedAt) / 1000);
     streamLog(`映像再生開始(起動から${elapsed}秒)`);
@@ -1113,12 +1177,14 @@ async function exitStreamView() {
   stopBtn.onclick = null;
   stopBtn.disabled = false;
   $('stream-video').srcObject = null;
+  setLaunchStep(0);
   showView('library');
 }
 
 // ---------- 初期化 ----------
 
 async function init() {
+  initVersionBadge();
   setLoginMode('qr');
   $('tab-qr').addEventListener('click', () => setLoginMode('qr'));
   $('tab-code').addEventListener('click', () => setLoginMode('code'));

@@ -1,7 +1,13 @@
 // Fastify ルート定義
 // 設計書 Phase 1: 認証プロキシ(デバイスフロー)+ ライブラリ表示 + 購読情報
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import QRCode from 'qrcode';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const APP_VERSION = `v${JSON.parse(readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version}-ui2`;
 
 import { DEFAULT_STREAMING_URL, TOKEN_REFRESH_WINDOW_MS, isTrustedStreamingBase } from './config.js';
 import {
@@ -102,7 +108,7 @@ function publicSessionView(record) {
 export async function registerRoutes(app) {
   // ---- 基本 ----
 
-  app.get('/healthz', async () => ({ ok: true, uptime: process.uptime(), store: store.stats() }));
+  app.get('/healthz', async () => ({ ok: true, version: APP_VERSION, uptime: process.uptime(), store: store.stats() }));
 
   // ---- 認証 ----
 
