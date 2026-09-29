@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.0-ui2';
+export const APP_VERSION = 'v0.5.1-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -679,6 +679,7 @@ async function launchGame() {
   localStorage.setItem(REGION_STORAGE_KEY, selectedRegion);
   const regionOption = $('launch-region').selectedOptions[0];
   const regionText = selectedRegion === 'auto' ? '自動' : (regionOption?.dataset?.baseLabel ?? selectedRegion);
+  streamLog(`launch: POST /api/session/start appId=${game.launchAppId} region=${selectedRegion} ${settings.resolution}@${settings.fps}/${settings.maxBitrateMbps}Mbps`);
   let info;
   try {
     ({ session: info } = await api('/api/session/start', {
@@ -703,7 +704,21 @@ async function launchGame() {
       return;
     }
     const kind = error.payload?.kind;
-    setStreamStatus('セッション作成に失敗', error.message);
+    state.lastLaunchError = {
+      at: new Date().toISOString(),
+      status: error.status ?? null,
+      code: error.code ?? null,
+      kind: kind ?? null,
+      message: error.message,
+    };
+    streamLog(`launch FAILED: status=${error.status ?? '-'} code=${error.code ?? '-'} kind=${kind ?? '-'} ${error.message}`);
+    setStreamStatus('セッション作成に失敗', `${error.message} (status=${error.status ?? '-'} code=${error.code ?? '-'}${kind ? ` kind=${kind}` : ''})`);
+    // 401 = サーバー再起動等でログインセッション消失 → 再ログインへ誘導
+    if (error.status === 401) {
+      showToast('ログインセッションが失効しました(サーバー再起動など)。再ログインしてください。', 8000);
+      setTimeout(() => logout(), 2500);
+      return;
+    }
     // 再試行が有効なエラー(更新中/混雑系)はリトライボタンを提供
     const retryable = ['app_patching', 'app_maintenance', 'capacity', 'queue_full', 'unavailable', 'forwarding'].includes(kind);
     if (retryable) {
@@ -1222,8 +1237,9 @@ async function init() {
     const dump = JSON.stringify({
       at: new Date().toISOString(),
       userAgent: navigator.userAgent,
-      appVersion: 'v4',
+      appVersion: APP_VERSION,
       session: state.session ? { tier: state.session.user?.membershipTier, imported: state.session.imported } : null,
+      lastLaunchError: state.lastLaunchError ?? null,
       sessionInfo: info,
       adRuntime: state.adRuntime ? { adId: state.adRuntime.adId, reportedFinish: state.adRuntime.reportedFinish, lastAction: state.adRuntime.lastAction, finished: [...(state.adRuntime.finishedIds ?? [])] } : null,
       logs: logLines.split('\n'),
