@@ -934,7 +934,16 @@ export async function pollSession({ state, token, deviceHashId }) {
       }
     }
   }
-  throw lastError ?? new UpstreamError('session_error', 'Session polling failed on all candidate bases');
+  const finalError = lastError ?? new UpstreamError('session_error', 'Session polling failed on all candidate bases');
+  // 410判定の根拠をフロントの診断ログに渡す(猶予が効かなかった理由の確定用)
+  finalError.debug = {
+    createdAt: state.createdAt ?? null,
+    ageMs: Number.isFinite(state.createdAt) ? Date.now() - Number(state.createdAt) : null,
+    graceMs: SESSION_PROPAGATION_GRACE_MS,
+    hadInfo: Boolean(state.info),
+    triedBases: candidates.map((c) => c.href),
+  };
+  throw finalError;
 }
 
 /** 既存セッションのclaim/resume(cloudmatch.rs:477-570) */

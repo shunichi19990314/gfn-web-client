@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.11-ui2';
+export const APP_VERSION = 'v0.5.12-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -930,14 +930,27 @@ function startSessionPolling() {
         const goneRetry = state.sessionGoneRetry ?? 0;
         const goneTotal = state.goneRelaunchTotal ?? 0;
         const game = state.launchGame;
-        if (game && goneRetry < 1 && goneTotal < 3) {
-          // 起動直後の失効(ゾンビ復帰/即時破棄)→ 新しいセッションを自動再作成
-          // (予算は作成成功ごとにリセット。合計3回までで無限ループを防止)
+        const sessionAgeMs = state.stream?.startedAt ? Date.now() - state.stream.startedAt : Infinity;
+        // 作成直後(<10秒)の消滅 = NVIDIA側レート制限/不正防止による即時無効化の疑い。
+        // 連打は事態を悪化させるため、長いバックオフで少数回のみ再試行する
+        const instantVanish = sessionAgeMs < 10000;
+        streamLog(`poll: session_gone (sessionAge=${Math.round(sessionAgeMs / 1000)}s instant=${instantVanish}) debug=${JSON.stringify(error.payload?.debug ?? null)}`);
+        const maxTotal = instantVanish ? 2 : 3;
+        if (game && goneRetry < 1 && goneTotal < maxTotal) {
           state.sessionGoneRetry = goneRetry + 1;
           state.goneRelaunchTotal = goneTotal + 1;
-          const backoffMs = 5000 * Math.pow(2, state.goneRelaunchTotal - 1); // 5s → 10s → 20s
-          streamLog(`poll: session_gone → ${Math.round(backoffMs / 1000)}秒後に自動再作成 (合計 ${state.goneRelaunchTotal}/3)`);
-          try { setStreamStatus('セッションが失効しました — 自動的に作り直します…', `${Math.round(backoffMs / 1000)}秒待ってから新しいセッションを作成します(NVIDIAのレート制限回避のため)`); } catch { /* ignore */ }
+          const backoffMs = instantVanish
+            ? [30000, 90000][Math.min(state.goneRelaunchTotal - 1, 1)] // 30s → 90s
+            : 5000 * Math.pow(2, state.goneRelaunchTotal - 1);          // 5s → 10s → 20s
+          streamLog(`poll: → ${Math.round(backoffMs / 1000)}秒後に自動再作成 (合計 ${state.goneRelaunchTotal}/${maxTotal})`);
+          try {
+            setStreamStatus(
+              instantVanish ? 'セッションが作成直後に無効化されました — NVIDIAのレート制限の可能性があります' : 'セッションが失効しました — 自動的に作り直します…',
+              instantVanish
+                ? `${Math.round(backoffMs / 1000)}秒待って再試行します。繰り返し失敗する場合は10〜15分間あけてから起動してください(連打すると制限が強化されます)`
+                : `${Math.round(backoffMs / 1000)}秒待ってから新しいセッションを作成します`,
+            );
+          } catch { /* ignore */ }
           try { await api('/api/session/stop', { method: 'POST' }); } catch { /* ignore */ }
           if (state.stream?.pollTimer) clearTimeout(state.stream.pollTimer);
           try { state.stream?.gfnStream?.dispose(); } catch { /* ignore */ }
@@ -945,8 +958,13 @@ function startSessionPolling() {
           setTimeout(() => launchGame(game, { preserveLog: true }), backoffMs);
           return;
         }
-        streamLog('poll: session_gone — サーバー側でセッション失効。ライブラリに戻ります');
-        showToast('セッションがサーバー側で失効しました。もう一度起動してください。', 8000);
+        streamLog('poll: session_gone — 自動再作成の上限。ライブラリに戻ります');
+        showToast(
+          instantVanish
+            ? 'セッションが作成直後に無効化され続けています。NVIDIA側のレート制限の可能性が高いため、10〜15分待ってから再起動してください。'
+            : 'セッションがサーバー側で失効しました。もう一度起動してください。',
+          12000,
+        );
         await exitStreamView();
         return;
       }

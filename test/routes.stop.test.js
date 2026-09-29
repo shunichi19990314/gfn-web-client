@@ -291,3 +291,50 @@ test('create 429 REQUEST_LIMIT_EXCEEDED → kind=request_limit の502', async (t
   assert.equal(res.statusCode, 502, res.body);
   assert.equal(res.json().kind, 'request_limit');
 });
+
+// ---- 410 session_gone に debug 診断を含める(v0.5.12) ----
+
+test('poll: 猶予超過後の全基404 → 410 + debug(createdAt/ageMs/triedBases)', async (t) => {
+  const app = await buildApp({ logger: false });
+  t.after(() => app.close());
+  const sid = seededSessionWithRegion();
+  const createdSession = {
+    requestStatus: { statusCode: 1 },
+    session: {
+      sessionId: 'vanish-1', status: 1, connectionInfo: [],
+      sessionRequestData: { appId: 555, clientRequestMonitorSettings: [{}], requestedStreamingFeatures: {} },
+    },
+  };
+  mockFetch(t, async (url, options) => {
+    const u = String(url);
+    if (options?.method === 'POST' && u.includes('/v2/session?')) return jsonResponse(createdSession);
+    if (options?.method === 'DELETE') return jsonResponse({ requestStatus: { statusCode: 1 } });
+    if (u.endsWith('/v2/session')) return jsonResponse({ requestStatus: { statusCode: 1 }, sessions: [] }); // LIST: 発見されず
+    if (u.includes('/v2/session/vanish-1')) {
+      return jsonResponse({ requestStatus: { statusCode: 22, statusDescription: 'INVALID_SESSION_ID_NOT_FOUND_STATUS' } }, 404);
+    }
+    throw new Error('unexpected ' + u);
+  });
+  const start = await app.inject({
+    method: 'POST', url: '/api/session/start',
+    headers: { 'content-type': 'application/json' },
+    payload: { appId: '555', settings: {} },
+    cookies: { gfnweb_sid: sid },
+  });
+  assert.equal(start.statusCode, 201, start.body);
+  // 猶予期間を超過させた状態にする
+  const active = store.getActiveSession(sid);
+  active.createdAt = Date.now() - 60_000;
+  store.setActiveSession(sid, active);
+
+  const poll = await app.inject({ method: 'GET', url: '/api/session/poll', cookies: { gfnweb_sid: sid } });
+  assert.equal(poll.statusCode, 410, poll.body);
+  const body = poll.json();
+  assert.equal(body.error, 'session_gone');
+  assert.ok(body.debug, 'debug情報を含む');
+  assert.equal(typeof body.debug.createdAt, 'number');
+  assert.ok(body.debug.ageMs > 50_000);
+  assert.equal(body.debug.graceMs, 20000);
+  assert.ok(Array.isArray(body.debug.triedBases) && body.debug.triedBases.length >= 1);
+  assert.equal(store.getActiveSession(sid), null, '410でローカル状態は解放');
+});

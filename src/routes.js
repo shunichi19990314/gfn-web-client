@@ -402,6 +402,7 @@ export async function registerRoutes(app) {
           error: 'session_gone',
           message: 'このセッションはサーバー側で失効しています。ライブラリに戻って起動し直してください。',
           sessionId: active.sessionId,
+          debug: error.debug ?? null,
         });
       }
       throw error;
