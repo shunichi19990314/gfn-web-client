@@ -234,42 +234,53 @@ function monitorDisplayData(hdr) {
 
 // ---------- リクエストボディ ----------
 
-/** cloudmatch.rs:886-994 build_create_body の移植 */
+/**
+ * Web(WebRTC)セッション作成ボディ
+ * 出典: OpenNOW v0.5.5 cloudmatchSessionRequest.ts buildSessionRequestBody +
+ *       cloudmatchFeatures.ts buildRequestedStreamingFeatures
+ * 重要な差分(Rustネイティブ版と混同しないこと):
+ *   sdkVersion "1.0" / streamerVersion 1(数値)/ secureRTSPSupported false /
+ *   enhancedStreamMode 1 / metaData に GSStreamerType=WebRTC /
+ *   availableSupportedControllers [] / dpi 0 / dynamicStreamingMode 3 /
+ *   accountLinked 既定 true / userAge 26 / partnerCustomData ""
+ * → これにより CloudMatch は ICE/TURN 構成と /nvst/ Webシグナリングを持つ
+ *   WebRTCセッションをプロビジョンする(ネイティブ仕様だと rtsps エンドポイントの
+ *   みのセッションが返り、ブラウザでは接続不能 — 2026-09-29 実測で確認)
+ */
 export function buildCreateBody({ appId, params = {}, settings = {}, deviceHashId }) {
   const { width, height } = parseResolution(settings.resolution ?? '1920x1080');
   const fps = Math.min(240, Math.max(30, Number(settings.fps ?? 60)));
   const bitrate = Math.min(200, Math.max(1, Number(settings.maxBitrateMbps ?? 75))) * 1000;
-  const codec = codecWire(settings.codec ?? 'auto');
-  const hdr =
-    Boolean(settings.enableHdr) &&
-    Boolean(settings.nativeHdrSupported) &&
-    (codec === 2 || codec === 3);
-  const requestedColor = colorQualityWire(settings.colorQuality ?? '8bit_420');
-  let bitDepth;
-  let chroma;
-  if (codec === 2 && hdr) [bitDepth, chroma] = [1, requestedColor[1]];
-  else if (codec === 3 && hdr) [bitDepth, chroma] = [1, 0];
-  else if (codec === 1) [bitDepth, chroma] = [0, 0];
-  else if (codec === 3) [bitDepth, chroma] = [requestedColor[0], 0];
-  else [bitDepth, chroma] = requestedColor;
+  // Web版は H264 既定(ブラウザのHWデコード互換性重視)。auto(0)はサーバーが
+  // HEVC/AV1を選ぶ可能性があり、Chrome環境次第で黒画面になるため既定にしない
+  const codec = codecWire(settings.codec ?? 'h264');
+  // HDRはElectron版同様ハードコードOFF(10bit colorQuality と HDR は別トグル。
+  // 混同するとサーバーがHDRパイプラインを構成し解像度が~540pに動的ダウンスケールされた実績あり)
+  const hdr = false;
+  const [reqBitDepth, reqChroma] = colorQualityWire(settings.colorQuality ?? '8bit_420');
+  // H.264は8bit 4:2:0のみ(Rust版と同じ制約)
+  const bitDepth = codec === 1 ? 0 : reqBitDepth;
+  const chromaFormat = codec === 1 ? 0 : reqChroma;
 
   const cloudGsync = settings.nativeCloudGsyncMode === 'disabled'
     ? false
     : settings.nativeCloudGsyncMode === 'forced'
       ? true
       : Boolean(settings.enableCloudGsync ?? false);
-  const reflex = cloudGsync || fps >= 120;
+  const reflex = cloudGsync || fps >= 120; // DEFAULT_MINIMUM_FPS_FOR_REFLEX_WITHOUT_VRR
   const persistence =
-    settings.enablePersistingInGameSettings !== false && params.supportsInGameSettingsPersistence === true;
+    params.enablePersistingInGameSettings === true && params.supportsInGameSettingsPersistence === true;
   const physicalResolution = JSON.stringify({ horizontalPixels: width, verticalPixels: height });
-  const clientPlatformName = settings.identifyAsSteamDeck ? 'SteamOS' : settings.clientPlatformName ?? 'Windows';
+  const clientPlatformName = settings.identifyAsSteamDeck ? 'SteamOS' : 'windows';
 
+  // webRtcSessionMetadata(cloudmatchSessionRequest.ts:33-47)— 順序も合わせる
   const metadata = [
-    { key: 'ClientImeSupport', value: '0' },
     { key: 'SubSessionId', value: randomUUID() },
-    { key: 'clientPhysicalResolution', value: physicalResolution },
-    { key: 'networkType', value: 'Unknown' },
     { key: 'wssignaling', value: '1' },
+    { key: 'GSStreamerType', value: 'WebRTC' },
+    { key: 'networkType', value: 'Unknown' },
+    { key: 'ClientImeSupport', value: '0' },
+    { key: 'clientPhysicalResolution', value: physicalResolution },
     { key: 'surroundAudioInfo', value: '2' },
   ];
   const features = {
@@ -280,85 +291,103 @@ export function buildCreateBody({ appId, params = {}, settings = {}, deviceHashI
     supportedHidDevices: 0,
     profile: 0,
     fallbackToLogicalResolution: false,
-    chromaFormat: chroma,
+    chromaFormat,
     prefilterMode: 0,
     prefilterSharpness: 0,
     prefilterNoiseReduction: 0,
     hudStreamingMode: 0,
-    codec,
     maxBitrateKbps: bitrate,
+    codec,
     vsync: false,
+    dynamicStreamingMode: 3,
     audioChannelCount: 2,
-    mouseMovementFlags: 0,
-    trueHdr: hdr,
-    hidDevices: null,
-    qosPolicy: 0,
-    touchSupport: false,
-    dynamicStreamingMode: 0,
   };
   return {
     sessionRequestData: {
       appId: Number.parseInt(appId, 10) || 0,
-      externalAppId: null,
       internalTitle: params.title ?? null,
-      availableSupportedControllers: [2],
-      preferredController: 2,
+      availableSupportedControllers: [],
       networkTestSessionId: null,
       parentSessionId: null,
       clientIdentification: 'GFN-PC',
       deviceHashId,
       clientVersion: '30.0',
-      sdkVersion: '2.0',
-      streamerVersion: '14',
+      sdkVersion: '1.0',
+      streamerVersion: 1,
       clientPlatformName,
       clientRequestMonitorSettings: [{
         monitorId: 0, positionX: 0, positionY: 0,
         widthInPixels: width, heightInPixels: height, framesPerSecond: fps,
-        sdrHdrMode: hdr ? 1 : 0,
-        displayData: monitorDisplayData(hdr),
+        sdrHdrMode: 0,
+        displayData: {},
         hdr10PlusGamingData: null,
-        dpi: 96,
+        dpi: 0,
       }],
       useOps: true,
       audioMode: 2,
       metaData: metadata,
-      sdrHdrMode: hdr ? 1 : 0,
+      sdrHdrMode: 0,
       clientDisplayHdrCapabilities: null,
       surroundAudioInfo: 0,
       remoteControllersBitmap: 0,
       clientTimezoneOffset: -new Date().getTimezoneOffset() * 60 * 1000,
-      enhancedStreamMode: 0,
+      enhancedStreamMode: 1,
       appLaunchMode: appLaunchMode(params),
-      secureRTSPSupported: true,
-      partnerCustomData: null,
-      accountLinked: params.accountLinked === true,
+      secureRTSPSupported: false,
+      partnerCustomData: '',
+      accountLinked: params.accountLinked !== false,
       enablePersistingInGameSettings: persistence,
-      requestedAudioFormat: 0,
-      userAge: 25,
+      userAge: 26,
       requestedStreamingFeatures: features,
-      transport: null,
     },
   };
 }
 
-/** cloudmatch.rs:821-875 build_resume_body の移植(RESUMEはコーデック/解像度/FPSを再交渉しない) */
+/**
+ * claim/RESUMEボディ — Electron buildClaimRequestBody(cloudmatchSessionRequest.ts:136-199)準拠。
+ * RESUMEではストリーミングパラメータを再交渉しない(送るとHTTP 400)。最小フィールドのみ。
+ */
 export function buildResumeBody({ appId, session, settings = {}, deviceHashId }) {
-  const created = buildCreateBody({ appId, params: {}, settings, deviceHashId }).sessionRequestData;
-  const keepKeys = [
-    'appId', 'audioMode', 'remoteControllersBitmap', 'sdrHdrMode', 'networkTestSessionId',
-    'availableSupportedControllers', 'preferredController', 'clientVersion', 'deviceHashId',
-    'internalTitle', 'clientPlatformName', 'surroundAudioInfo', 'clientTimezoneOffset',
-    'clientIdentification', 'parentSessionId', 'streamerVersion', 'secureRTSPSupported',
-  ];
-  const request = {};
-  for (const key of keepKeys) request[key] = created[key];
-  request.sdrHdrMode = acceptedHdrMode(session) ?? 0;
-  request.metaData = (created.metaData ?? []).filter((entry) => entry.key !== 'clientPhysicalResolution');
-  for (const key of ['appLaunchMode', 'enablePersistingInGameSettings', 'clientPlatformName']) {
-    const value = session?.sessionRequestData?.[key];
-    if (value !== null && value !== undefined) request[key] = value;
-  }
-  return { action: 2, data: 'RESUME', sessionRequestData: request, metaData: null, adUpdates: null };
+  return {
+    action: 2,
+    data: 'RESUME',
+    sessionRequestData: {
+      audioMode: 2,
+      remoteControllersBitmap: 0,
+      sdrHdrMode: 0,
+      networkTestSessionId: null,
+      availableSupportedControllers: [],
+      clientVersion: '30.0',
+      deviceHashId,
+      internalTitle: null,
+      clientPlatformName: settings.identifyAsSteamDeck ? 'SteamOS' : 'windows',
+      metaData: [
+        { key: 'SubSessionId', value: randomUUID() },
+        { key: 'wssignaling', value: '1' },
+        { key: 'GSStreamerType', value: 'WebRTC' },
+        { key: 'networkType', value: 'Unknown' },
+        { key: 'ClientImeSupport', value: '0' },
+        { key: 'surroundAudioInfo', value: '2' },
+      ],
+      surroundAudioInfo: 0,
+      clientTimezoneOffset: -new Date().getTimezoneOffset() * 60 * 1000,
+      clientIdentification: 'GFN-PC',
+      parentSessionId: null,
+      appId: Number.parseInt(appId, 10) || 0,
+      streamerVersion: 1,
+      appLaunchMode: valueI64(session?.sessionRequestData?.appLaunchMode) ?? appLaunchMode(settings),
+      sdkVersion: '1.0',
+      enhancedStreamMode: 1,
+      useOps: true,
+      clientDisplayHdrCapabilities: null,
+      accountLinked: true,
+      partnerCustomData: '',
+      enablePersistingInGameSettings: session?.sessionRequestData?.enablePersistingInGameSettings === true,
+      secureRTSPSupported: false,
+      userAge: 26,
+    },
+    metaData: [],
+  };
 }
 
 function acceptedHdrMode(session) {
@@ -708,7 +737,8 @@ export async function createSession({ appId, params = {}, settings = {}, token, 
   url.searchParams.set('keyboardLayout', keyboardLayout);
   url.searchParams.set('languageCode', language);
   const body = buildCreateBody({ appId, params, settings, deviceHashId });
-  const headers = cloudmatchHeaders(token, deviceHashId);
+  const clientId = randomUUID(); // Electron: セッション単位で安定した clientId
+  const headers = cloudmatchHeaders(token, deviceHashId, { clientId, includeOrigin: true });
   const result = await fetchJson(url, { method: 'POST', headers, body: JSON.stringify(body) });
 
   // セッション競合(既存セッションあり)
@@ -726,90 +756,90 @@ export async function createSession({ appId, params = {}, settings = {}, token, 
   const zone = params.zone ?? base.hostname;
   const info = sessionInfo(payload, { fallbackBase: base.href, zone, fallbackAppId: appId, deviceId: deviceHashId });
   info.keyboardLayout = keyboardLayout;
-  const requestCodec = codecFromWire(body.sessionRequestData.requestedStreamingFeatures.codec);
-  if (!info.negotiatedStreamProfile.codec && requestCodec) {
-    info.negotiatedStreamProfile.codec = requestCodec;
+  info.clientId = clientId;
+  if (!info.negotiatedStreamProfile.codec) {
+    info.negotiatedStreamProfile.codec = codecFromWire(body.sessionRequestData.requestedStreamingFeatures.codec);
     info.negotiatedStreamProfile.codecSource = 'request';
   }
-
-  // 互換性RESUME PUT(古いCloudMatchプール向け。失敗してもポーリング可能なので無視 — cloudmatch.rs:118-152)
-  if (info.sessionId) {
-    try {
-      const resumeUrl = new URL(`v2/session/${info.sessionId}`, base.href);
-      resumeUrl.searchParams.set('keyboardLayout', keyboardLayout);
-      resumeUrl.searchParams.set('languageCode', language);
-      const hdr = acceptedHdrMode(payload?.session);
-      const resumeBody = buildResumeBody({ appId, session: payload.session, settings, deviceHashId });
-      if (hdr !== null) {
-        resumeBody.sessionRequestData.sdrHdrMode = hdr;
-        resumeBody.sessionRequestData.clientRequestMonitorSettings[0].sdrHdrMode = hdr;
-        resumeBody.sessionRequestData.clientRequestMonitorSettings[0].displayData = monitorDisplayData(hdr === 1);
-        resumeBody.sessionRequestData.requestedStreamingFeatures.trueHdr = hdr === 1;
-      }
-      await fetchJson(resumeUrl, { method: 'PUT', headers, body: JSON.stringify(resumeBody) });
-    } catch {
-      /* 互換性目的のため失敗は無視 */
-    }
-  }
-  return { info, base, zone };
+  // 注意: Rustネイティブ版にあった「作成直後の互換RESUME PUT」はWebセッションでは送らない
+  // (Electron版createにも存在せず、Webセッションの状態機械を乱す可能性があるため)
+  return { info, base, zone, clientId };
 }
 
-/** セッションポーリング(cloudmatch.rs:157-233 poll) */
+/**
+ * セッションポーリング(cloudmatch.rs:157-233 poll + 404フォールバック拡張)
+ * 作成基とセッション制御基が食い違う場合(リージョン間転送など)に
+ * INVALID_SESSION_ID_NOT_FOUND(404) になるため、複数の候補基を順に試す。
+ * 成功した基は effectiveBase として返し、routes 側が state.pollBase に保存する。
+ * @returns {{info: object, effectiveBase: string}}
+ */
 export async function pollSession({ state, token, deviceHashId }) {
   if (!state?.sessionId) throw new UpstreamError('invalid_params', 'No active session');
-  const controlBase = state.controlBase;
-  let base;
-  if (state.serverIp && controlBase?.includes(state.serverIp)) {
-    base = trustedLearnedServerBase(state.serverIp) ?? trustedCloudmatchBase(controlBase);
-  } else {
-    base = trustedCloudmatchBase(controlBase);
-  }
-  if (!base) throw new UpstreamError('invalid_params', 'No active session control endpoint');
-  const headers = cloudmatchHeaders(token, deviceHashId);
-  const url = new URL(`v2/session/${state.sessionId}`, base.href);
-  const payload = await getWithRetry(url, headers, 'Session polling failed');
-  let info = sessionInfo(payload, { fallbackBase: base.href, zone: state.zone, fallbackAppId: state.appId, deviceId: deviceHashId });
+  const headers = cloudmatchHeaders(token, deviceHashId, { clientId: state.clientId, includeOrigin: false });
 
-  // ゾーン基でstatus 2/3になったら、学習したserverIp直アドレスで再取得(cloudmatch.rs:196-215)
-  if (
-    [2, 3].includes(info.status) &&
-    isZoneHostname(base.hostname) &&
-    info.serverIp &&
-    !isZoneHostname(info.serverIp)
-  ) {
-    const direct = trustedLearnedServerBase(info.serverIp);
-    if (direct) {
-      try {
-        const directUrl = new URL(`v2/session/${state.sessionId}`, direct.href);
-        const directPayload = await getWithRetry(directUrl, headers, 'Session polling failed');
-        const directInfo = sessionInfo(directPayload, { fallbackBase: direct.href, zone: state.zone, fallbackAppId: state.appId, deviceId: deviceHashId });
-        if (!directInfo.negotiatedStreamProfile.codec && info.negotiatedStreamProfile.codec) {
-          directInfo.negotiatedStreamProfile = { ...directInfo.negotiatedStreamProfile, codec: info.negotiatedStreamProfile.codec, codecSource: info.negotiatedStreamProfile.codecSource };
+  const candidates = [];
+  const push = (url) => {
+    if (url && !candidates.some((c) => c.href === url.href)) candidates.push(url);
+  };
+  if (state.pollBase) push(trustedCloudmatchBase(state.pollBase) ?? trustedLearnedServerBase(state.pollBase));
+  if (state.serverIp && state.controlBase?.includes(state.serverIp)) push(trustedLearnedServerBase(state.serverIp));
+  push(trustedCloudmatchBase(state.controlBase));
+  if (state.requestedBase) push(trustedCloudmatchBase(state.requestedBase));
+  if (state.serverIp) push(trustedLearnedServerBase(state.serverIp));
+  if (state.zone) push(trustedCloudmatchBase(`https://${state.zone}`));
+  if (candidates.length === 0) throw new UpstreamError('invalid_params', 'No active session control endpoint');
+
+  let lastError = null;
+  for (const base of candidates) {
+    let payload;
+    try {
+      payload = await getWithRetry(new URL(`v2/session/${state.sessionId}`, base.href), headers, 'Session polling failed');
+    } catch (error) {
+      lastError = error;
+      // 404(INVALID_SESSION_ID_NOT_FOUND)なら次の候補基へ。それ以外は即失敗
+      const notFound = error instanceof UpstreamError && error.status === 404;
+      if (notFound) continue;
+      throw error;
+    }
+    let info = sessionInfo(payload, { fallbackBase: base.href, zone: state.zone, fallbackAppId: state.appId, deviceId: deviceHashId });
+    // ゾーン基でstatus 2/3になったら、学習したserverIp直アドレスで再取得(cloudmatch.rs:196-215)
+    if ([2, 3].includes(info.status) && isZoneHostname(base.hostname) && info.serverIp && !isZoneHostname(info.serverIp)) {
+      const direct = trustedLearnedServerBase(info.serverIp);
+      if (direct) {
+        try {
+          const directPayload = await getWithRetry(new URL(`v2/session/${state.sessionId}`, direct.href), headers, 'Session polling failed');
+          const directInfo = sessionInfo(directPayload, { fallbackBase: direct.href, zone: state.zone, fallbackAppId: state.appId, deviceId: deviceHashId });
+          if (!directInfo.negotiatedStreamProfile.codec && info.negotiatedStreamProfile.codec) {
+            directInfo.negotiatedStreamProfile = { ...directInfo.negotiatedStreamProfile, codec: info.negotiatedStreamProfile.codec, codecSource: info.negotiatedStreamProfile.codecSource };
+          }
+          info = directInfo;
+          return { info, effectiveBase: direct.href };
+        } catch {
+          /* ゾーン基の結果を維持 */
         }
-        info = directInfo;
-      } catch {
-        /* ゾーン基の結果を維持 */
       }
     }
-  }
-  if (state.resumePending) {
-    const ready = [2, 3].includes(info.status) && (info.rtspsEndpoints?.length ?? 0) > 0;
-    if (![1, 2, 3, 4, 5, 6].includes(info.status)) {
-      info.resumePending = false;
-      info.phase = 'failed';
-    } else {
-      info.resumePending = !ready;
-      if (!ready) info.phase = 'resuming';
+    if (state.resumePending) {
+      const ready = [2, 3].includes(info.status) && (info.rtspsEndpoints?.length ?? 0) > 0 || [2, 3].includes(info.status) && info.signalingUrl;
+      if (![1, 2, 3, 4, 5, 6].includes(info.status)) {
+        info.resumePending = false;
+        info.phase = 'failed';
+      } else {
+        info.resumePending = !ready;
+        if (!ready) info.phase = 'resuming';
+      }
     }
+    return { info, effectiveBase: base.href };
   }
-  return info;
+  throw lastError ?? new UpstreamError('session_error', 'Session polling failed on all candidate bases');
 }
 
 /** 既存セッションのclaim/resume(cloudmatch.rs:477-570) */
 export async function claimSession({ sessionId, state, settings = {}, token, deviceHashId, providerBase }) {
   const requested = trustedCloudmatchBase(providerBase || DEFAULT_STREAMING_URL) ?? new URL(DEFAULT_STREAMING_URL);
-  const lookupBase = (state?.serverIp && trustedLearnedServerBase(state.serverIp)) ?? requested;
-  const headers = cloudmatchHeaders(token, deviceHashId);
+  const lookupBase = (state?.pollBase && trustedCloudmatchBase(state.pollBase)) ??
+    (state?.serverIp && trustedLearnedServerBase(state.serverIp)) ?? requested;
+  const headers = cloudmatchHeaders(token, deviceHashId, { clientId: state?.clientId, includeOrigin: true });
   const payload = await getWithRetry(new URL(`v2/session/${sessionId}`, lookupBase.href), headers, 'Session claim failed');
   const session = payload?.session;
   const initialStatus = valueI64(session?.status) ?? 0;
@@ -842,11 +872,12 @@ export async function claimSession({ sessionId, state, settings = {}, token, dev
 export async function stopSession({ state, token, deviceHashId }) {
   if (!state?.sessionId) return { stopped: false };
   let base = null;
-  if (state.serverIp && !isZoneHostname(state.serverIp)) base = trustedLearnedServerBase(state.serverIp);
+  if (state.pollBase) base = trustedCloudmatchBase(state.pollBase) ?? trustedLearnedServerBase(state.pollBase);
+  if (!base && state.serverIp && !isZoneHostname(state.serverIp)) base = trustedLearnedServerBase(state.serverIp);
   if (!base) base = trustedCloudmatchBase(state.controlBase ?? DEFAULT_STREAMING_URL);
   if (!base) return { stopped: false };
   const url = new URL(`v2/session/${state.sessionId}`, base.href);
-  const result = await fetchJson(url, { method: 'DELETE', headers: cloudmatchHeaders(token, deviceHashId) });
+  const result = await fetchJson(url, { method: 'DELETE', headers: cloudmatchHeaders(token, deviceHashId, { clientId: state.clientId, includeOrigin: false }) });
   if (!(result.status >= 200 && result.status < 300) && result.status !== 404) {
     const description = result.payload?.requestStatus?.statusDescription;
     throw new UpstreamError('session_error', `Session stop failed (${result.status})${description ? `: ${description}` : ''}`);
@@ -863,7 +894,8 @@ export async function reportAd({ state, params, token, deviceHashId }) {
   const adId = params?.adId;
   if (typeof adId !== 'string' || adId === '') throw new UpstreamError('invalid_params', 'adId is required');
   let base = null;
-  if (state.serverIp) base = trustedLearnedServerBase(state.serverIp);
+  if (state.pollBase) base = trustedCloudmatchBase(state.pollBase) ?? trustedLearnedServerBase(state.pollBase);
+  if (!base && state.serverIp) base = trustedLearnedServerBase(state.serverIp);
   if (!base) base = trustedCloudmatchBase(state.controlBase);
   if (!base) throw new UpstreamError('invalid_params', 'No active session control endpoint');
   const update = {
@@ -879,7 +911,7 @@ export async function reportAd({ state, params, token, deviceHashId }) {
   const url = new URL(`v2/session/${state.sessionId}`, base.href);
   const result = await fetchJson(url, {
     method: 'PUT',
-    headers: cloudmatchHeaders(token, deviceHashId),
+    headers: cloudmatchHeaders(token, deviceHashId, { clientId: state.clientId, includeOrigin: false }),
     body: JSON.stringify({ action: 6, adUpdates: [update] }),
   });
   const payload = validateCloudmatchResponse('Session ad update failed', result.status, result.payload, {});

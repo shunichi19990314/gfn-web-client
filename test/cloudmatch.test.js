@@ -19,29 +19,40 @@ import {
 
 // ---- build_create_body ----
 
-test('buildCreateBody: 既定設定の主要フィールド', () => {
+test('buildCreateBody: Web(WebRTC)仕様の主要フィールド', () => {
   const body = buildCreateBody({ appId: '12345', params: { title: 'Portal 2' }, settings: {}, deviceHashId: 'dev-uuid' });
   const req = body.sessionRequestData;
   assert.equal(req.appId, 12345);
   assert.equal(req.internalTitle, 'Portal 2');
   assert.equal(req.clientIdentification, 'GFN-PC');
   assert.equal(req.clientVersion, '30.0');
-  assert.equal(req.streamerVersion, '14');
+  // Web仕様の要(Electron cloudmatchSessionRequest.ts 準拠)
+  assert.equal(req.sdkVersion, '1.0');
+  assert.equal(req.streamerVersion, 1);
+  assert.equal(req.secureRTSPSupported, false);
+  assert.equal(req.enhancedStreamMode, 1);
+  assert.equal(req.accountLinked, true);
+  assert.equal(req.userAge, 26);
+  assert.equal(req.partnerCustomData, '');
+  assert.deepEqual(req.availableSupportedControllers, []);
   assert.equal(req.deviceHashId, 'dev-uuid');
-  assert.equal(req.secureRTSPSupported, true);
   assert.equal(req.audioMode, 2);
   assert.equal(req.useOps, true);
   const monitor = req.clientRequestMonitorSettings[0];
   assert.equal(monitor.widthInPixels, 1920);
   assert.equal(monitor.heightInPixels, 1080);
   assert.equal(monitor.framesPerSecond, 60);
-  assert.equal(monitor.dpi, 96);
+  assert.equal(monitor.dpi, 0);
+  assert.deepEqual(monitor.displayData, {});
   const features = req.requestedStreamingFeatures;
-  assert.equal(features.codec, 0); // auto
+  assert.equal(features.codec, 1); // Web既定はH264
   assert.equal(features.maxBitrateKbps, 75000); // 75Mbps既定
   assert.equal(features.audioChannelCount, 2);
-  assert.equal(features.trueHdr, false);
-  // metaData の wssignaling=1 が含まれること(WebSocketシグナリングの要求)
+  assert.equal(features.dynamicStreamingMode, 3); // 公式Webクライアント値
+  assert.equal('trueHdr' in features, false); // Electron版featuresに存在しないキーは送らない
+  // metaData: GSStreamerType=WebRTC + wssignaling=1 が必須
+  const gs = req.metaData.find((m) => m.key === 'GSStreamerType');
+  assert.equal(gs?.value, 'WebRTC');
   const wss = req.metaData.find((m) => m.key === 'wssignaling');
   assert.equal(wss?.value, '1');
   const sub = req.metaData.find((m) => m.key === 'SubSessionId');
@@ -87,6 +98,12 @@ test('buildResumeBody: action=2/RESUME、clientPhysicalResolutionを含まない
   assert.equal(body.data, 'RESUME');
   assert.ok(!body.sessionRequestData.metaData.some((m) => m.key === 'clientPhysicalResolution'));
   assert.equal(body.sessionRequestData.appId, 999);
+  assert.equal(body.sessionRequestData.sdkVersion, '1.0');
+  assert.equal(body.sessionRequestData.streamerVersion, 1);
+  assert.equal(body.sessionRequestData.secureRTSPSupported, false);
+  assert.equal(body.sessionRequestData.metaData.find((m) => m.key === 'GSStreamerType')?.value, 'WebRTC');
+  assert.deepEqual(body.metaData, []);
+  assert.equal('clientRequestMonitorSettings' in body.sessionRequestData, false); // 再交渉しない
 });
 
 // ---- session_info ----
@@ -300,4 +317,54 @@ test('mergeAdStateForPoll: 新しいリストがあれば差し替え、広告�
   assert.deepEqual(mergeAdStateForPoll([{ adId: 'old' }], info1), fresh);
   const info2 = { adState: null };
   assert.deepEqual(mergeAdStateForPoll(fresh, info2), fresh);
+});
+
+
+// ---- poll の404フォールバック(実障害: us-oregon作成 → np-bom-01制御基 → 404) ----
+
+test('pollSession: 制御基が404なら作成基へフォールバックし effectiveBase を返す', async (t) => {
+  const { pollSession } = await import('../src/cloudmatch.js');
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const hits = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    hits.push(u);
+    if (u.includes('np-bom-01')) {
+      return { ok: false, status: 404, headers: new Headers(), text: async () => JSON.stringify({ requestStatus: { statusCode: 22, statusDescription: 'INVALID_SESSION_ID_NOT_FOUND_STATUS 8A8C2000' } }) };
+    }
+    if (u.includes('us-oregon')) {
+      return {
+        ok: true, status: 200, headers: new Headers(),
+        text: async () => JSON.stringify({
+          requestStatus: { statusCode: 1 },
+          session: {
+            sessionId: 'sess-1', status: 2,
+            connectionInfo: [{ usage: 14, ip: '1.2.3.4', port: 443, resourcePath: '/nvst/' }],
+            iceServerConfiguration: { iceServers: [{ urls: ['turn:turn.example:3478'], username: 'u', credential: 'c' }] },
+            sessionRequestData: { appId: 9, clientRequestMonitorSettings: [{ widthInPixels: 1920, heightInPixels: 1080, framesPerSecond: 60 }] },
+          },
+        }),
+      };
+    }
+    throw new Error('unexpected url ' + u);
+  };
+  const state = {
+    sessionId: 'sess-1',
+    controlBase: 'https://np-bom-01.cloudmatchbeta.nvidiagrid.net',
+    requestedBase: 'https://us-oregon.cloudmatchbeta.nvidiagrid.net/',
+    serverIp: null,
+    zone: 'ap-india.cloudmatchbeta.nvidiagrid.net',
+    appId: '9',
+    clientId: 'cid',
+  };
+  const { info, effectiveBase } = await pollSession({ state, token: 'jwt', deviceHashId: 'dev' });
+  assert.equal(info.status, 2);
+  assert.equal(info.phase, 'ready');
+  assert.equal(effectiveBase, 'https://us-oregon.cloudmatchbeta.nvidiagrid.net/');
+  assert.ok(hits[0].includes('np-bom-01'), 'まず制御基を試す');
+  assert.ok(hits.some((h) => h.includes('us-oregon')), '作成基へフォールバック');
+  // Webセッションでは usage14 ip → /nvst/ シグナリングURL
+  assert.equal(info.signalingUrl, 'wss://1.2.3.4:443/nvst/');
+  assert.equal(info.iceServers.length, 1); // TURNが返る(フォールバックSTUNではない)
 });

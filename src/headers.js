@@ -1,5 +1,6 @@
 // ヘッダビルダー群
 // 出典: OpenNOW v0.5.5 clientHeaders.ts / native gfn.rs:2514-2588, cloudmatch.rs:1243-1266, 1812-1820
+import { randomUUID } from 'node:crypto';
 import {
   GFN_CLIENT_VERSION,
   GFN_PLAY_ORIGIN,
@@ -96,22 +97,34 @@ export function graphqlHeaders(token) {
   };
 }
 
-/** CloudMatch(v2/*)用 — cloudmatch.rs:1243-1266。Phase 2 で使用する */
-export function cloudmatchHeaders(token, deviceId, { platform = 'windows' } = {}) {
-  const userAgent = `GFN-PC/30.0 (${platform}) BifrostClientSDK/4.9 (38495286)`;
-  return {
-    'User-Agent': userAgent,
+/** CloudMatch(v2/*)用 — Electron版 buildGfnCloudMatchHeaders 準拠(clientHeaders.ts:157-181)
+ *  注意: Rustネイティブ版(Bifrost UA/text-plain)ではなく、Web(WebRTC)セッション用のヘッダ。
+ *  作成時は Origin/Referer あり、ポーリング時は無し(Electron cloudmatch.ts:116,146) */
+export const GFN_WEB_CLIENT_VERSION = '2.0.80.173';
+export const GFN_WEB_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 NVIDIACEFClient/HEAD/debb5919f6 GFN-PC/2.0.80.173';
+
+export function cloudmatchHeaders(token, deviceId, { clientId, includeOrigin = true } = {}) {
+  const headers = {
+    'User-Agent': GFN_WEB_USER_AGENT,
     Authorization: `GFNJWT ${token}`,
     'Content-Type': 'application/json',
-    'nv-client-id': LCARS_CLIENT_ID,
+    'nv-browser-type': 'CHROME',
+    'nv-client-id': clientId ?? randomUUID(),
     'nv-client-streamer': 'NVIDIA-CLASSIC',
     'nv-client-type': 'NATIVE',
-    'nv-client-version': GFN_CLIENT_VERSION,
+    'nv-client-version': GFN_WEB_CLIENT_VERSION,
+    // deviceIdentity.ts: サーバーホスト(Linux)のデスクトップ識別子。
+    // clientPlatformName と同様に OpenNOW デスクトップ版は make/model=UNKNOWN を送信
     'nv-device-os': 'LINUX',
     'nv-device-type': 'DESKTOP',
-    'nv-device-make': 'GENERIC',
-    'nv-device-model': 'PC',
+    'nv-device-make': 'UNKNOWN',
+    'nv-device-model': 'UNKNOWN',
     'x-device-id': deviceId,
-    'x-nv-client-identity': userAgent,
   };
+  if (includeOrigin !== false) {
+    headers.Origin = GFN_PLAY_ORIGIN;
+    headers.Referer = GFN_PLAY_REFERER;
+  }
+  return headers;
 }

@@ -327,7 +327,7 @@ export async function registerRoutes(app) {
         session: existing.info,
       });
     }
-    const { info, base, zone } = await createSession({
+    const { info, base, zone, clientId } = await createSession({
       appId: String(appId),
       params: { title: typeof title === 'string' ? title : null, appLaunchMode, zone: undefined },
       settings: settings ?? {},
@@ -338,12 +338,14 @@ export async function registerRoutes(app) {
     store.setActiveSession(session.sid, {
       sessionId: info.sessionId,
       controlBase: info.streamingBaseUrl,
+      pollBase: base.href, // 実際に作成に成功した基(404時のフォールバック起点)
+      requestedBase: base.href,
       serverIp: info.serverIp,
       zone,
       appId: String(appId),
+      clientId,
       keyboardLayout: info.keyboardLayout,
       resumePending: false,
-      requestedBase: base.href,
       lastSessionAds: Array.isArray(info.adState?.sessionAds) && info.adState.sessionAds.length > 0 ? info.adState.sessionAds : null,
       info,
     });
@@ -357,7 +359,7 @@ export async function registerRoutes(app) {
     const active = requireActiveSession(session.sid, reply);
     if (!active) return;
     if (!limit(request, reply, 'session-poll', { max: 300, windowMs: 60_000 })) return;
-    const info = await pollSession({
+    const { info, effectiveBase } = await pollSession({
       state: active,
       token: sessionToken(session.tokens),
       deviceHashId: session.deviceHashId,
@@ -368,6 +370,7 @@ export async function registerRoutes(app) {
     active.controlBase = info.streamingBaseUrl;
     active.serverIp = info.serverIp;
     active.resumePending = info.resumePending === true;
+    if (effectiveBase) active.pollBase = effectiveBase; // 成功した基を次回以降の第一候補に
     store.setActiveSession(session.sid, active);
     return { session: info };
   });
@@ -434,9 +437,12 @@ export async function registerRoutes(app) {
     store.setActiveSession(session.sid, {
       sessionId: info.sessionId,
       controlBase: info.streamingBaseUrl ?? controlBase.href,
+      pollBase: controlBase.href,
+      requestedBase: resolveProviderBase(session),
       serverIp: info.serverIp,
       zone: info.zone,
       appId: info.appId,
+      clientId: info.clientId ?? null,
       keyboardLayout: info.keyboardLayout,
       resumePending: true,
       info,
