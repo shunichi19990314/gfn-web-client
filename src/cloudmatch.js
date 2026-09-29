@@ -404,6 +404,7 @@ function acceptedHdrMode(session) {
  * 出典: OpenNOW v0.5.5 gfnErrorCodeEnum.ts(statusCode定義)+ gfnErrorMessages.ts(公式メッセージ)
  */
 const SESSION_ERROR_BY_STATUS = new Map([
+  [10, ['request_limit', 'セッション要求が多すぎます(NVIDIAのレート制限)。5〜10分待ってから再試行してください']],
   [13, ['time_exceeded', 'セッションの権利時間(allotted time)を超過しました']],
   [19, ['invalid_app', 'このゲームは現在利用できません(appIdが無効/提供終了)']],
   [20, ['invalid_app', 'このゲームは現在利用できません(appIdが見つかりません)']],
@@ -441,6 +442,7 @@ const SESSION_ERROR_BY_DESCRIPTION = [
   [/QUEUE_LENGTH_EXCEEDED/i, 'queue_full', '待機行列が上限に達しています'],
   [/IN_QUEUE_ABANDONED|QUEUE_ABANDONED/i, 'queue_abandoned', '待機行列のリクエストがサーバー側で破棄されました(混雑/キュータイムアウト)。自動再試行します'],
   [/CAPACITY/i, 'capacity', 'サーバーが混雑しています'],
+  [/REQUEST_LIMIT_EXCEEDED|REQUEST_LIMIT/i, 'request_limit', 'セッション要求が多すぎます(NVIDIAのレート制限)。5〜10分待ってから再試行してください'],
 ];
 
 /**

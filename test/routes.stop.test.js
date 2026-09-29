@@ -230,3 +230,64 @@ test('start: 生存しているactive状態があれば409を維持', async (t) 
   assert.equal(res.statusCode, 409, `body: ${res.body}`);
   assert.equal(res.json().error, 'session_conflict');
 });
+
+// ---- start→poll の猶予期間エンドツーエンド(v0.5.10の配線検証) ----
+
+test('start直後の全基404 pollは 410 session_gone ではなく 200 transient', async (t) => {
+  const app = await buildApp({ logger: false });
+  t.after(() => app.close());
+  const sid = seededSessionWithRegion();
+  const createdSession = {
+    requestStatus: { statusCode: 1 },
+    session: {
+      sessionId: 'fresh-e2e', status: 1, connectionInfo: [],
+      sessionRequestData: { appId: 555, clientRequestMonitorSettings: [{ widthInPixels: 1920, heightInPixels: 1080, framesPerSecond: 60 }], requestedStreamingFeatures: { codec: 1 } },
+    },
+  };
+  mockFetch(t, async (url, options) => {
+    const u = String(url);
+    if (options?.method === 'POST' && u.includes('/v2/session?')) return jsonResponse(createdSession);
+    if (options?.method === 'DELETE') return jsonResponse({ requestStatus: { statusCode: 1 } });
+    if (u.endsWith('/v2/session')) return jsonResponse({ requestStatus: { statusCode: 1 }, sessions: [] }); // cleanup/discovery LIST
+    if (u.includes('/v2/session/fresh-e2e')) {
+      return jsonResponse({ requestStatus: { statusCode: 22, statusDescription: 'INVALID_SESSION_ID_NOT_FOUND_STATUS' } }, 404);
+    }
+    throw new Error('unexpected ' + u);
+  });
+  const start = await app.inject({
+    method: 'POST', url: '/api/session/start',
+    headers: { 'content-type': 'application/json' },
+    payload: { appId: '555', settings: {} },
+    cookies: { gfnweb_sid: sid },
+  });
+  assert.equal(start.statusCode, 201, start.body);
+  const poll = await app.inject({ method: 'GET', url: '/api/session/poll', cookies: { gfnweb_sid: sid } });
+  assert.equal(poll.statusCode, 200, `grace期間内は200であること: ${poll.body}`);
+  assert.equal(poll.json().transient, true);
+  assert.equal(poll.json().session.sessionId, 'fresh-e2e');
+  // アクティブ状態は維持されている(410で解放されていない)
+  assert.ok(store.getActiveSession(sid));
+});
+
+test('create 429 REQUEST_LIMIT_EXCEEDED → kind=request_limit の502', async (t) => {
+  const app = await buildApp({ logger: false });
+  t.after(() => app.close());
+  const sid = seededSessionWithRegion();
+  mockFetch(t, async (url, options) => {
+    const u = String(url);
+    if (options?.method === 'POST' && u.includes('/v2/session?')) {
+      return jsonResponse({ requestStatus: { statusCode: 10, statusDescription: 'REQUEST_LIMIT_EXCEEDED_STATUS 4A8C2024' } }, 429);
+    }
+    if (u.endsWith('/v2/session')) return jsonResponse({ requestStatus: { statusCode: 1 }, sessions: [] });
+    throw new Error('unexpected ' + u);
+  });
+  const res = await app.inject({
+    method: 'POST', url: '/api/session/start',
+    headers: { 'content-type': 'application/json' },
+    payload: { appId: '555', settings: {} },
+    cookies: { gfnweb_sid: sid },
+  });
+  // 429はgetWithRetryでリトライ後にthrow → session_error(502) + kind=request_limit
+  assert.equal(res.statusCode, 502, res.body);
+  assert.equal(res.json().kind, 'request_limit');
+});

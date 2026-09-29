@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.10-ui2';
+export const APP_VERSION = 'v0.5.11-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -846,6 +846,7 @@ async function launchGameInner(game, opts = {}) {
       return;
     }
     // 再試行が有効なエラー(更新中/混雑系)はリトライボタンを提供
+    // request_limit(429)は即再試行すると悪化するため対象外(メッセージで待機を促す)
     const retryable = ['app_patching', 'app_maintenance', 'capacity', 'queue_full', 'unavailable', 'forwarding'].includes(kind);
     if (retryable) {
       const btn = $('stream-cancel-btn');
@@ -934,13 +935,14 @@ function startSessionPolling() {
           // (予算は作成成功ごとにリセット。合計3回までで無限ループを防止)
           state.sessionGoneRetry = goneRetry + 1;
           state.goneRelaunchTotal = goneTotal + 1;
-          streamLog(`poll: session_gone → 自動再作成 (合計 ${state.goneRelaunchTotal}/3)`);
-          try { setStreamStatus('セッションが失効しました — 自動的に作り直します…', '新しいセッションを作成中'); } catch { /* ignore */ }
+          const backoffMs = 5000 * Math.pow(2, state.goneRelaunchTotal - 1); // 5s → 10s → 20s
+          streamLog(`poll: session_gone → ${Math.round(backoffMs / 1000)}秒後に自動再作成 (合計 ${state.goneRelaunchTotal}/3)`);
+          try { setStreamStatus('セッションが失効しました — 自動的に作り直します…', `${Math.round(backoffMs / 1000)}秒待ってから新しいセッションを作成します(NVIDIAのレート制限回避のため)`); } catch { /* ignore */ }
           try { await api('/api/session/stop', { method: 'POST' }); } catch { /* ignore */ }
           if (state.stream?.pollTimer) clearTimeout(state.stream.pollTimer);
           try { state.stream?.gfnStream?.dispose(); } catch { /* ignore */ }
           state.stream = null;
-          launchGame(game, { preserveLog: true });
+          setTimeout(() => launchGame(game, { preserveLog: true }), backoffMs);
           return;
         }
         streamLog('poll: session_gone — サーバー側でセッション失効。ライブラリに戻ります');
