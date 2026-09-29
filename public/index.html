@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>GFN Web MVP — Phase 1</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/styles.css?v=4" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>" />
 </head>
 <body>
@@ -157,6 +157,7 @@
           <span id="stream-game-title"></span>
           <span id="stream-session-meta" class="muted"></span>
           <span class="spacer"></span>
+          <button id="stream-diag-btn" class="btn small ghost" type="button" title="現在のセッション状態とログをクリップボードにコピー">診断情報</button>
           <button id="stream-fullscreen-btn" class="btn small ghost" type="button">全画面</button>
           <button id="stream-stop-btn" class="btn small danger" type="button">セッション終了</button>
         </div>
@@ -244,6 +245,6 @@
     </article>
   </template>
 
-  <script src="/app.js" type="module"></script>
+  <script src="/app.js?v=4" type="module"></script>
 </body>
 </html>

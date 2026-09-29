@@ -31,10 +31,11 @@ function showToast(message, ms = 5000) {
   toast._timer = setTimeout(() => toast.classList.add('hidden'), ms);
 }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, timeoutMs = 30000) {
   const response = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
     credentials: 'same-origin',
+    signal: AbortSignal.timeout(timeoutMs),
     ...options,
   });
   const payload = await response.json().catch(() => null);
@@ -664,7 +665,11 @@ async function launchGame() {
     return;
   }
   state.stream = { gfnStream: null, signaling: null, pollTimer: null, sessionInfo: info, startedAt: Date.now() };
-  setStreamStatus(`セッション準備中… (status=${info.status} ${info.phase})`);
+  setStreamStatus(
+    'セッション準備中…',
+    `status=${info.status} (${info.phase}) / seatSetupStep=${info.seatSetupStep ?? '-'} / queue=${info.queuePosition ?? '-'} / ads=${info.adState?.isAdsRequired ?? false} / zone=${info.zone ?? '-'}`,
+  );
+  streamLog(`session created: ${JSON.stringify({ status: info.status, phase: info.phase, seat: info.seatSetupStep, queue: info.queuePosition, ads: info.adState?.isAdsRequired ?? false, serverIp: info.serverIp || null, signalingUrl: info.signalingUrl || null, zone: info.zone })}`);
   startSessionPolling();
 }
 
@@ -699,34 +704,53 @@ async function handleSessionConflict(error) {
 function startSessionPolling() {
   const stream = state.stream;
   if (!stream) return;
-  const deadline = Date.now() + 3 * 60 * 1000; // 3分タイムアウト
+  // 無料枠のキューは数分〜10分以上かかることがあるため15分に延長
+  const deadline = Date.now() + 15 * 60 * 1000;
+  let pollCount = 0;
   const poll = async () => {
     if (!state.stream) return;
     if (Date.now() > deadline) {
-      setStreamStatus('セッション準備がタイムアウトしました', '3分以内にreadyになりませんでした');
+      setStreamStatus('セッション準備がタイムアウトしました', '15分以内にreadyになりませんでした。リージョンを変えて再試行するか、混雑していない時間帯にお試しください');
       return;
     }
+    pollCount += 1;
     let info;
     try {
-      ({ session: info } = await api('/api/session/poll'));
+      ({ session: info } = await api('/api/session/poll', {}, 15000));
     } catch (error) {
-      setStreamStatus('ポーリング失敗', error.message);
+      try {
+        setStreamStatus('ポーリング失敗 — 自動再試行します', error.message);
+        streamLog(`poll error: ${error.message}`);
+      } catch { /* DOMキャッシュ不整合でもループは生かす */ }
       state.stream.pollTimer = setTimeout(poll, 3000);
       return;
     }
     state.stream.sessionInfo = info;
-    updateSessionUi(info);
-    if ([2, 3].includes(info.status) && info.signalingUrl && info.iceServers?.length && !state.stream.gfnStream) {
-      clearInterval(state.stream.pollTimer);
-      state.stream.pollTimer = null;
-      await beginStreaming(info);
-      return; // ストリーミング開始後はポーリング停止
+    // UI更新が例外を投げてもポーリングループは絶対に止めない(自己回復)
+    try {
+      updateSessionUi(info);
+      if (pollCount % 10 === 0) {
+        streamLog(`poll #${pollCount}: status=${info.status} phase=${info.phase} seat=${info.seatSetupStep ?? '-'} queue=${info.queuePosition ?? '-'} ads=${info.adState?.isAdsRequired ?? false}`);
+      }
+    } catch (uiError) {
+      streamLog(`UI update error (loop continues): ${uiError?.message}`);
     }
-    if (info.phase === 'failed') {
-      setStreamStatus('セッションが失敗しました', `status=${info.status}`);
-      return;
+    try {
+      // ready判定: serverIp が学習済みであることも要求(シグナリング接続先として必須)
+      if ([2, 3].includes(info.status) && info.serverIp && info.signalingUrl && info.iceServers?.length && !state.stream.gfnStream) {
+        if (state.stream.pollTimer) { clearTimeout(state.stream.pollTimer); state.stream.pollTimer = null; }
+        await beginStreaming(info);
+        return;
+      }
+      if (info.phase === 'failed') {
+        setStreamStatus('セッションが失敗しました', `status=${info.status}`);
+        return;
+      }
+    } catch (error) {
+      streamLog(`stream start error: ${error?.message}`);
+      setStreamStatus('ストリーミング開始中にエラー(ポーリングは継続)', error?.message ?? String(error));
     }
-    state.stream.pollTimer = setTimeout(poll, 1000);
+    if (state.stream) state.stream.pollTimer = setTimeout(poll, 1000);
   };
   stream.pollTimer = setTimeout(poll, 500);
 }
@@ -797,18 +821,22 @@ function getPlayableAds(info) {
 }
 
 function showAdFallback(text) {
+  if (!$('ad-overlay')) { streamLog('ad UI missing (stale HTML cache?) — reporting cancel to skip'); return false; }
   $('ad-overlay').classList.remove('hidden');
   $('ad-video').classList.add('hidden');
   $('ad-fallback').classList.remove('hidden');
   $('ad-fallback-text').textContent = text;
   $('ad-play-btn').classList.add('hidden');
+  return true;
 }
 
 function hideAdOverlay() {
+  if (!$('ad-overlay')) return;
   $('ad-overlay').classList.add('hidden');
-  $('ad-fallback').classList.add('hidden');
-  $('ad-play-btn').classList.add('hidden');
+  $('ad-fallback')?.classList.add('hidden');
+  $('ad-play-btn')?.classList.add('hidden');
   const video = $('ad-video');
+  if (!video) { clearAdWatchdogs(); state.adRuntime = null; return; }
   video.classList.add('hidden');
   video.pause();
   video.removeAttribute('src');
@@ -840,6 +868,14 @@ function handleQueueAds(info) {
 }
 
 async function startAdPlayback(ad, index, total) {
+  if (!$('ad-video') || !$('ad-overlay')) {
+    // 旧HTMLキャッシュ等で広告UIが存在しない → 再生不能としてcancel報告し通常キューへ
+    streamLog(`ad: UI unavailable, reporting cancel for ${ad.adId}`);
+    state.adRuntime = { adId: ad.adId, index, reportedFinish: true, finishedIds: state.adRuntime?.finishedIds ?? new Set() };
+    state.adRuntime.finishedIds.add(ad.adId);
+    reportAdAction('cancel', ad, { cancelReason: 'error', errorInfo: 'Error loading url' });
+    return;
+  }
   clearAdWatchdogs();
   const previousFinished = state.adRuntime?.finishedIds ?? new Set();
   state.adRuntime = {
@@ -1114,6 +1150,21 @@ async function init() {
     }
   });
   // ストリームビュー
+  $('stream-diag-btn')?.addEventListener('click', async () => {
+    const info = state.stream?.sessionInfo ?? null;
+    const logLines = [...($('stream-log')?.children ?? [])].slice(-60).map((n) => n.textContent).join('\n');
+    const dump = JSON.stringify({
+      at: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      appVersion: 'v4',
+      session: state.session ? { tier: state.session.user?.membershipTier, imported: state.session.imported } : null,
+      sessionInfo: info,
+      adRuntime: state.adRuntime ? { adId: state.adRuntime.adId, reportedFinish: state.adRuntime.reportedFinish, lastAction: state.adRuntime.lastAction, finished: [...(state.adRuntime.finishedIds ?? [])] } : null,
+      logs: logLines.split('\n'),
+    }, null, 2);
+    streamLog(`--- diagnostics (appVersion v4) ---\n${dump}`);
+    await copyText(dump);
+  });
   $('stream-stop-btn').addEventListener('click', exitStreamView);
   $('stream-cancel-btn').addEventListener('click', async () => {
     if ($('stream-cancel-btn').onclick) {

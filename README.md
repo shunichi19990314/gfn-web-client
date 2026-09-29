@@ -188,6 +188,19 @@ railway config apply
 | POST | `/api/session/ad` | 広告視聴状態の報告(PUT action:6) |
 | WS | `/ws/signaling?sessionId=` | NVSTシグナリングリレー(認証Cookie必須)→ `wss://{serverIp}:443/nvst/sign_in` |
 
+## トラブルシュート
+
+**「セッションを準備中…」から表示が変わらない場合**
+1. ストリームビューの「**診断情報**」ボタンを押す(セッションの生状態+ログ60行がクリップボードとログパネルに出力される)
+2. 出力の `appVersion` が現在のバージョン(v4)と一致するか確認 — 古い場合はハードリロード(Ctrl+Shift+R)。
+   なお v4 以降、HTML/JS/CSS は `Cache-Control: max-age=0`(常時再検証)+ バージョンクエリで配信され、
+   古いフロントエンドが残り続ける問題は解消済み
+3. 診断JSONの `sessionInfo.status` / `seatSetupStep` / `queuePosition` / `adState` を確認:
+   - `status=1, seatSetupStep=1, ads=required` → 無料枠のキュー広告フロー(広告再生で進行。v4で自動対応)
+   - `status=1, queue=N` → 単純な待機行列(混雑。最大15分ポーリング)
+   - `adState=null` で数分進行なし → リージョン混雑の可能性。起動モーダルで別リージョンを選択して再試行
+4. ポーリングループはv4で自己回復化済み(UI更新やストリーム開始が例外を投げても停止しない)
+
 ## 既知の制限(MVP)
 
 - セッションは**プロセス内メモリ**。再起動/スケールアウトで消失 → 次段でRender Key Value(Redis)へ差し替え

@@ -28,7 +28,18 @@ export async function buildApp({ logger = true } = {}) {
   app.decorate('productionCookieSecure', process.env.NODE_ENV === 'production' || onPaas);
 
   await app.register(fastifyCookie);
-  await app.register(fastifyStatic, { root: PUBLIC_DIR });
+  await app.register(fastifyStatic, {
+    root: PUBLIC_DIR,
+    setHeaders: (res, path) => {
+      // HTML/JS/CSSは no-cache(ETag再検証必須)にして、デプロイ後の
+      // 「古いフロントエンドJSがブラウザに残る」問題を防ぐ
+      if (/\.(html|js|css)$/i.test(path)) {
+        res.setHeader('Cache-Control', 'no-cache');
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=300');
+      }
+    },
+  });
 
   app.setErrorHandler(upstreamErrorHandler);
   await registerRoutes(app);
