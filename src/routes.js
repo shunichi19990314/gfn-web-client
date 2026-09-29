@@ -327,7 +327,7 @@ export async function registerRoutes(app) {
         session: existing.info,
       });
     }
-    const { info, base, zone, clientId } = await createSession({
+    const { info, base, zone, clientId, cleanedUp } = await createSession({
       appId: String(appId),
       params: { title: typeof title === 'string' ? title : null, appLaunchMode, zone: undefined },
       settings: settings ?? {},
@@ -349,8 +349,8 @@ export async function registerRoutes(app) {
       lastSessionAds: Array.isArray(info.adState?.sessionAds) && info.adState.sessionAds.length > 0 ? info.adState.sessionAds : null,
       info,
     });
-    request.log.info({ sessionId: info.sessionId, zone, status: info.status }, 'CloudMatch session created');
-    reply.code(201).send({ session: info });
+    request.log.info({ sessionId: info.sessionId, zone, status: info.status, cleanedUp: cleanedUp?.length ?? 0 }, 'CloudMatch session created');
+    reply.code(201).send({ session: info, cleanedUp: cleanedUp ?? [] });
   });
 
   app.get('/api/session/poll', async (request, reply) => {

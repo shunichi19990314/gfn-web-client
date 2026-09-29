@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.5-ui2';
+export const APP_VERSION = 'v0.5.6-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -81,6 +81,7 @@ const state = {
   loginMode: 'qr', // 'qr' | 'code'
   loginAttempt: null, // { attemptId, deviceCode, intervalMs, expiresAt, timer, countdownTimer }
   launchGame: null, // 起動対象のゲーム
+  launchRetryCount: 0, // queue_abandoned等の自動再試行回数
   regionsForLaunch: null, // /api/regions のキャッシュ
   stream: null, // { gfnStream, signaling, pollTimer, sessionInfo, startedAt }
   adRuntime: null, // { adId, index, lastAction, startedAtMs, wasPaused, startWatchdog, stuckWatchdog, lastProgressTs, reportedFinish }
@@ -685,6 +686,7 @@ async function measureRegionLatency() {
 
 function openLaunchModal(game) {
   state.launchGame = game;
+  state.launchRetryCount = 0;
   $('launch-title').textContent = `${game.title} を起動`;
   $('region-ping-status').textContent = '';
   populateRegionSelect();
@@ -732,8 +734,9 @@ function streamLog(message) {
   log.scrollTop = log.scrollHeight;
 }
 
-async function launchGame() {
-  const game = state.launchGame;
+async function launchGame(gameArg) {
+  const game = gameArg ?? state.launchGame;
+  state.launchGame = game;
   if (!game?.launchAppId) {
     showToast('起動できません: このゲームには数値のlaunchAppIdがありません');
     streamLog('launch aborted: no launchAppId');
@@ -778,8 +781,9 @@ async function launchGameInner(game, opts = {}) {
   setStreamStatus('CloudMatchセッションを作成中…', `appId ${game.launchAppId} / ${settings.resolution}@${settings.fps} / ${settings.maxBitrateMbps}Mbps / リージョン: ${regionText}`);
   streamLog(`launch: POST /api/session/start appId=${game.launchAppId} region=${selectedRegion} ${settings.resolution}@${settings.fps}/${settings.maxBitrateMbps}Mbps`);
   let info;
+  let cleanedUp = null;
   try {
-    ({ session: info } = await api('/api/session/start', {
+    ({ session: info, cleanedUp } = await api('/api/session/start', {
       method: 'POST',
       body: JSON.stringify({
         appId: game.launchAppId,
@@ -841,6 +845,9 @@ async function launchGameInner(game, opts = {}) {
       };
     }
     return;
+  }
+  if (Array.isArray(cleanedUp) && cleanedUp.length > 0) {
+    streamLog(`cleanup: removed ${cleanedUp.length} stale session(s): ${cleanedUp.map((c) => `${c.sessionId.slice(0, 8)}(status=${c.status})`).join(', ')}`);
   }
   state.stream = { gfnStream: null, signaling: null, pollTimer: null, sessionInfo: info, startedAt: Date.now() };
   setStreamStatus(
@@ -906,6 +913,41 @@ function startSessionPolling() {
         streamLog('poll: session_gone — サーバー側でセッション失効。ライブラリに戻ります');
         showToast('セッションがサーバー側で失効しました。もう一度起動してください。', 8000);
         await exitStreamView();
+        return;
+      }
+      const kind = error.payload?.kind;
+      const retriable = ['queue_abandoned', 'capacity', 'queue_full', 'forward_expired', 'unavailable'];
+      if (retriable.includes(kind)) {
+        const retryCount = state.launchRetryCount ?? 0;
+        if (retryCount < 2) {
+          state.launchRetryCount = retryCount + 1;
+          streamLog(`poll: ${kind} → 8秒後に自動再試行 (#${state.launchRetryCount}/2)`);
+          try {
+            setStreamStatus(`キューが破棄/混雑しました(${kind})— 自動再試行 #${state.launchRetryCount}/2`, '8秒後に新しいセッションを作成します。繰り返し失敗する場合は、日本など近いリージョンへの変更や時間帯の変更をお試しください');
+          } catch { /* ignore */ }
+          try { await api('/api/session/stop', { method: 'POST' }); } catch { /* ignore */ }
+          state.stream.pollTimer = setTimeout(() => {
+            if (!state.launchGame) return;
+            launchGame(state.launchGame);
+          }, 8000);
+          return;
+        }
+        // 再試行上限 → 手動リトライボタン
+        streamLog(`poll: ${kind} — 自動再試行上限(2回)に到達`);
+        try {
+          setStreamStatus('自動再試行の上限に達しました', `${error.message} — 別リージョン(日本推奨)や混雑していない時間帯での再試行をおすすめします`);
+          const btn = $('stream-cancel-btn');
+          if (btn) {
+            btn.textContent = '再試行';
+            btn.disabled = false;
+            btn.onclick = () => {
+              btn.textContent = 'キャンセル';
+              btn.onclick = null;
+              state.launchRetryCount = 0;
+              if (state.launchGame) launchGame(state.launchGame);
+            };
+          }
+        } catch { /* ignore */ }
         return;
       }
       try {

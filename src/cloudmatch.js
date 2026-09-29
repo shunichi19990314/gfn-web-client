@@ -420,6 +420,10 @@ const SESSION_ERROR_BY_STATUS = new Map([
   [56, ['app_maintenance', 'このゲームはメンテナンス中です']],
   [58, ['capacity', 'サーバー容量が不足しています(混雑)。時間をおいて再試行してください']],
   [62, ['queue_full', '待機行列が上限に達しています。時間をおいて再試行してください']],
+  [64, ['forward_expired', '転送リクエストの割り当て時間が切れました。再試行してください']],
+  [65, ['forward_binaries', 'このリージョンにゲームバイナリがありません。別リージョンでお試しください']],
+  [66, ['forward_binaries', 'このリージョンにゲームバイナリがありません。別リージョンでお試しください']],
+  [69, ['queue_abandoned', '待機行列のリクエストがサーバー側で破棄されました(混雑/キュータイムアウト/遠隔リージョンの無料枠で発生しやすい)。自動再試行します。改善しない場合は日本など近いリージョンや別の時間帯をお試しください']],
   [85, ['capacity', '容量不足のためセッションが拒否されました(SessionRejectedNoCapacity)']],
   [91, ['not_allowed', 'このゲームはストリーミングが許可されていません']],
 ]);
@@ -433,6 +437,7 @@ const SESSION_ERROR_BY_DESCRIPTION = [
   [/STEAM_LOGIN/i, 'steam_login', 'Steamログインが必要です'],
   [/EULA/i, 'eula', 'EULAへの同意が必要です'],
   [/QUEUE_LENGTH_EXCEEDED/i, 'queue_full', '待機行列が上限に達しています'],
+  [/IN_QUEUE_ABANDONED|QUEUE_ABANDONED/i, 'queue_abandoned', '待機行列のリクエストがサーバー側で破棄されました(混雑/キュータイムアウト)。自動再試行します'],
   [/CAPACITY/i, 'capacity', 'サーバーが混雑しています'],
 ];
 
@@ -721,8 +726,43 @@ export function resolveRequestedRegion(region, providerBase) {
 }
 
 /**
+ * 残留セッションのベストエフォート掃除。
+ * 前回テストのキュー残り(status=1)や自デバイス(deviceHashId一致)のセッションは
+ * 新しいキューリクエストの abandoned/競合を誘発するため、作成前に DELETE する。
+ * 他デバイスのストリーミング中(status 2/3)セッションは絶対に触らない。
+ */
+export async function cleanupStaleSessions({ bases, token, deviceHashId }) {
+  const headers = cloudmatchHeaders(token, deviceHashId, { includeOrigin: false });
+  const removed = [];
+  for (const baseUrl of bases) {
+    if (!baseUrl) continue;
+    try {
+      const result = await fetchJson(new URL('v2/session', baseUrl), { headers });
+      if (!result.ok) continue;
+      const sessions = Array.isArray(result.payload?.sessions) ? result.payload.sessions : [];
+      for (const sess of sessions) {
+        const sid = sess?.sessionId;
+        if (typeof sid !== 'string' || sid === '') continue;
+        const status = valueI64(sess?.status) ?? 0;
+        const sameDevice = sess?.sessionRequestData?.deviceHashId === deviceHashId;
+        if (!(status === 1 || sameDevice)) continue; // キュー残り or 自デバイスのみ
+        try {
+          await fetchJson(new URL(`v2/session/${sid}`, baseUrl), { method: 'DELETE', headers });
+          removed.push({ sessionId: sid, status, sameDevice });
+        } catch {
+          /* 個別削除失敗は無視 */
+        }
+      }
+    } catch {
+      /* 一覧取得失敗は無視(ベースごとにベストエフォート) */
+    }
+  }
+  return removed;
+}
+
+/**
  * セッション作成(cloudmatch.rs:57-155 create)
- * @returns {{info: object, base: URL, zone: string}}
+ * @returns {{info: object, base: URL, zone: string, clientId: string, cleanedUp: Array}}
  */
 export async function createSession({ appId, params = {}, settings = {}, token, deviceHashId, providerBase }) {
   if (!/^\d+$/.test(String(appId ?? ''))) {
@@ -739,6 +779,11 @@ export async function createSession({ appId, params = {}, settings = {}, token, 
   const clientId = randomUUID(); // Electron: セッション単位で安定した clientId
   const headers = cloudmatchHeaders(token, deviceHashId, { clientId, includeOrigin: true });
   const zone = params.zone ?? base.hostname;
+
+  // 作成前の残留掃除(ベストエフォート): キュー残り/自デバイス旧セッションを DELETE
+  const cleanupBases = [base.href];
+  if (DEFAULT_STREAMING_URL !== base.href) cleanupBases.push(DEFAULT_STREAMING_URL);
+  const cleaned = await cleanupStaleSessions({ bases: cleanupBases, token, deviceHashId });
 
   // CloudMatchは既存セッションがある場合、要求と異なるappIdのセッションを
   // 「静かに再利用」して返すことがある(2026-09-29実測: 103500271要求→102241311応答)。
@@ -784,7 +829,7 @@ export async function createSession({ appId, params = {}, settings = {}, token, 
   }
   // 注意: Rustネイティブ版にあった「作成直後の互換RESUME PUT」はWebセッションでは送らない
   // (Electron版createにも存在せず、Webセッションの状態機械を乱す可能性があるため)
-  return { info, base, zone, clientId };
+  return { info, base, zone, clientId, cleanedUp: cleaned };
 }
 
 /**

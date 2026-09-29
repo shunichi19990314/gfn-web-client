@@ -136,3 +136,55 @@ test('fetchLibraryPage: V2が成功すれば1回だけ', async (t) => {
   assert.equal(call, 1);
   assert.equal(page.games[0].patchLevel, 'auto');
 });
+
+// ---- queue_abandoned(実障害 2026-09-29)と残留掃除 ----
+
+test('describeSessionError: statusCode 69 → queue_abandoned', async () => {
+  const { describeSessionError } = await import('../src/cloudmatch.js');
+  assert.equal(describeSessionError({ statusCode: 69 }).kind, 'queue_abandoned');
+  assert.equal(describeSessionError({ statusCode: 64 }).kind, 'forward_expired');
+});
+
+test('describeSessionError: SESSION_REQUEST_IN_QUEUE_ABANDONED 文字列から推定', async () => {
+  const { describeSessionError } = await import('../src/cloudmatch.js');
+  // 実障害のレスポンス: HTTP 503 + statusDescription
+  const result = describeSessionError({ statusCode: null, description: 'SESSION_REQUEST_IN_QUEUE_ABANDONED 4A8C300F' });
+  assert.equal(result.kind, 'queue_abandoned');
+});
+
+test('cleanupStaleSessions: キュー残り(status1)と自デバイスのみ削除、他デバイスの配信中は残す', async (t) => {
+  const { cleanupStaleSessions } = await import('../src/cloudmatch.js');
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const deleted = [];
+  globalThis.fetch = async (url, options) => {
+    const u = String(url);
+    if (u.endsWith('/v2/session') && (!options?.method || options.method === 'GET')) {
+      return {
+        ok: true, status: 200, headers: new Headers(),
+        text: async () => JSON.stringify({
+          requestStatus: { statusCode: 1 },
+          sessions: [
+            { sessionId: 'queued-other', status: 1, sessionRequestData: { deviceHashId: 'other-device', appId: 5 } },
+            { sessionId: 'streaming-other', status: 3, sessionRequestData: { deviceHashId: 'other-device', appId: 6 } },
+            { sessionId: 'mine-paused', status: 4, sessionRequestData: { deviceHashId: 'my-device', appId: 7 } },
+          ],
+        }),
+      };
+    }
+    if (options?.method === 'DELETE') {
+      deleted.push(u);
+      return { ok: true, status: 200, headers: new Headers(), text: async () => '{"requestStatus":{"statusCode":1}}' };
+    }
+    throw new Error('unexpected ' + u);
+  };
+  const removed = await cleanupStaleSessions({
+    bases: ['https://us-oregon.cloudmatchbeta.nvidiagrid.net/'],
+    token: 'jwt',
+    deviceHashId: 'my-device',
+  });
+  assert.equal(removed.length, 2);
+  assert.ok(deleted.some((d) => d.includes('queued-other')));   // 他デバイスでもキュー残りは削除
+  assert.ok(deleted.some((d) => d.includes('mine-paused')));    // 自デバイスは状態問わず削除
+  assert.ok(!deleted.some((d) => d.includes('streaming-other'))); // 他デバイスの配信中は絶対に残す
+});
