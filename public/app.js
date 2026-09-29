@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.9-ui2';
+export const APP_VERSION = 'v0.5.10-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -82,7 +82,8 @@ const state = {
   loginAttempt: null, // { attemptId, deviceCode, intervalMs, expiresAt, timer, countdownTimer }
   launchGame: null, // 起動対象のゲーム
   launchRetryCount: 0, // queue_abandoned等の自動再試行回数
-  sessionGoneRetry: 0, // session_gone からの自動再作成回数(起動1回につき最大1)
+  sessionGoneRetry: 0, // session_gone からの自動再作成回数(作成成功ごとにリセット、1セッションにつき最大1)
+  goneRelaunchTotal: 0, // ユーザーの1回の起動操作あたりの自動再作成合計(無限ループ防止、上限3)
   regionsForLaunch: null, // /api/regions のキャッシュ
   stream: null, // { gfnStream, signaling, pollTimer, sessionInfo, startedAt }
   adRuntime: null, // { adId, index, lastAction, startedAtMs, wasPaused, startWatchdog, stuckWatchdog, lastProgressTs, reportedFinish }
@@ -696,6 +697,7 @@ function openLaunchModal(game) {
   state.launchGame = game;
   state.launchRetryCount = 0;
   state.sessionGoneRetry = 0;
+  state.goneRelaunchTotal = 0;
   $('launch-title').textContent = `${game.title} を起動`;
   $('region-ping-status').textContent = '';
   populateRegionSelect();
@@ -743,7 +745,7 @@ function streamLog(message) {
   log.scrollTop = log.scrollHeight;
 }
 
-async function launchGame(gameArg) {
+async function launchGame(gameArg, opts = {}) {
   const game = gameArg ?? state.launchGame;
   state.launchGame = game;
   if (!game?.launchAppId) {
@@ -754,7 +756,7 @@ async function launchGame(gameArg) {
   // 起動処理全体のガード: DOM不整合や予期しない同期例外でも
   // 「静かに固まる」代わりに必ずログ+ステータスカードに出す
   try {
-    await launchGameInner(game);
+    await launchGameInner(game, opts);
   } catch (error) {
     state.lastLaunchError = {
       at: new Date().toISOString(),
@@ -781,8 +783,12 @@ async function launchGameInner(game, opts = {}) {
 
   showView('stream');
   setLaunchStep(1);
-  clearLogBuffer();
-  if ($('stream-log')) $('stream-log').innerHTML = '';
+  if (opts.preserveLog) {
+    streamLog('=== relaunch ===');
+  } else {
+    clearLogBuffer();
+    if ($('stream-log')) $('stream-log').innerHTML = '';
+  }
   $('stream-game-title').textContent = game.title;
   $('stream-session-meta').textContent = '';
   $('stream-stats').classList.add('hidden');
@@ -812,7 +818,7 @@ async function launchGameInner(game, opts = {}) {
           try { await api('/api/session/stop', { method: 'POST' }); } catch (stopError) {
             streamLog(`conflict: stop failed (${stopError.message}) — retrying anyway`);
           }
-          return launchGameInner(game, { retriedAfterConflict: true });
+          return launchGameInner(game, { retriedAfterConflict: true, preserveLog: true });
         }
         // 再作成しても競合 → そのセッションに復帰
         state.stream = { gfnStream: null, signaling: null, pollTimer: null, sessionInfo: error.payload.session, startedAt: Date.now() };
@@ -858,6 +864,7 @@ async function launchGameInner(game, opts = {}) {
   if (Array.isArray(cleanedUp) && cleanedUp.length > 0) {
     streamLog(`cleanup: removed ${cleanedUp.length} stale session(s): ${cleanedUp.map((c) => `${c.sessionId.slice(0, 8)}(status=${c.status})`).join(', ')}`);
   }
+  state.sessionGoneRetry = 0; // 新しいセッション = 新しい自動再作成予算
   state.stream = { gfnStream: null, signaling: null, pollTimer: null, sessionInfo: info, startedAt: Date.now() };
   setStreamStatus(
     'セッション準備中…',
@@ -920,17 +927,20 @@ function startSessionPolling() {
     } catch (error) {
       if (error.code === 'session_gone') {
         const goneRetry = state.sessionGoneRetry ?? 0;
+        const goneTotal = state.goneRelaunchTotal ?? 0;
         const game = state.launchGame;
-        if (game && goneRetry < 1) {
-          // 起動直後の失効(ゾンビ復帰/即時破棄)→ 新しいセッションを1回だけ自動再作成
+        if (game && goneRetry < 1 && goneTotal < 3) {
+          // 起動直後の失効(ゾンビ復帰/即時破棄)→ 新しいセッションを自動再作成
+          // (予算は作成成功ごとにリセット。合計3回までで無限ループを防止)
           state.sessionGoneRetry = goneRetry + 1;
-          streamLog(`poll: session_gone → 自動再作成 #${state.sessionGoneRetry}`);
+          state.goneRelaunchTotal = goneTotal + 1;
+          streamLog(`poll: session_gone → 自動再作成 (合計 ${state.goneRelaunchTotal}/3)`);
           try { setStreamStatus('セッションが失効しました — 自動的に作り直します…', '新しいセッションを作成中'); } catch { /* ignore */ }
           try { await api('/api/session/stop', { method: 'POST' }); } catch { /* ignore */ }
           if (state.stream?.pollTimer) clearTimeout(state.stream.pollTimer);
           try { state.stream?.gfnStream?.dispose(); } catch { /* ignore */ }
           state.stream = null;
-          launchGame(game);
+          launchGame(game, { preserveLog: true });
           return;
         }
         streamLog('poll: session_gone — サーバー側でセッション失効。ライブラリに戻ります');

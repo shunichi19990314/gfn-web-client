@@ -1,6 +1,6 @@
 {
   "name": "gfn-web-mvp",
-  "version": "0.5.9",
+  "version": "0.5.10",
   "private": true,
   "description": "Phase 1 MVP: GeForce NOW auth proxy + library browser (OpenNOW-style web client)",
   "type": "module",

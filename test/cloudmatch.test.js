@@ -488,3 +488,76 @@ test('fixServerIp: ダッシュ形式ホスト名→IP変換で0.0.0.0候補を�
   assert.match(fixed, /a=candidate:1 1 udp 2130706431 66\.22\.139\.37 50000 typ host/);
   assert.equal((fixed.match(/0\.0\.0\.0/g) ?? []).length, 0);
 });
+
+// ---- 作成直後の404猶予 + LISTディスカバリ(v0.5.10) ----
+
+const YOUNG_STATE = () => ({
+  sessionId: 'fresh-1',
+  createdAt: Date.now(), // 作成直後
+  controlBase: 'https://np-ams-06.cloudmatchbeta.nvidiagrid.net',
+  pollBase: 'https://eu-netherlands-north.cloudmatchbeta.nvidiagrid.net/',
+  requestedBase: 'https://eu-netherlands-north.cloudmatchbeta.nvidiagrid.net/',
+  serverIp: 'np-ams-06.cloudmatchbeta.nvidiagrid.net',
+  zone: 'eu-netherlands-north.cloudmatchbeta.nvidiagrid.net',
+  appId: '555',
+  info: { sessionId: 'fresh-1', status: 1, phase: 'preparing' },
+});
+
+test('pollSession: 作成20秒以内の全基404は transient(410にしない)', async (t) => {
+  const { pollSession } = await import('../src/cloudmatch.js');
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  globalThis.fetch = async () => ({
+    ok: false, status: 404, headers: new Headers(),
+    text: async () => JSON.stringify({ requestStatus: { statusCode: 22, statusDescription: 'INVALID_SESSION_ID_NOT_FOUND_STATUS' } }),
+  });
+  const result = await pollSession({ state: YOUNG_STATE(), token: 'jwt', deviceHashId: 'dev' });
+  assert.equal(result.transient, true);
+  assert.equal(result.info.sessionId, 'fresh-1');
+  assert.equal(result.info.pollTransient, true);
+});
+
+test('pollSession: 猶予超過後はLISTディスカバリで移動先を発見する', async (t) => {
+  const { pollSession } = await import('../src/cloudmatch.js');
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const state = YOUNG_STATE();
+  state.createdAt = Date.now() - 60_000; // 猶予超過
+  const movedSession = {
+    sessionId: 'fresh-1', status: 2,
+    connectionInfo: [{ usage: 14, ip: '1.2.3.4', port: 443, resourcePath: '/nvst/' }],
+    iceServerConfiguration: { iceServers: [{ urls: ['turn:t:3478'], username: 'u', credential: 'c' }] },
+    sessionRequestData: { appId: 555, clientRequestMonitorSettings: [{ widthInPixels: 1920, heightInPixels: 1080, framesPerSecond: 60 }] },
+  };
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith('/v2/session')) {
+      // LIST: 作成基(eu-netherlands-north)でのみ発見できる
+      const sessions = u.includes('eu-netherlands-north') ? [movedSession] : [];
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify({ requestStatus: { statusCode: 1 }, sessions }) };
+    }
+    return { ok: false, status: 404, headers: new Headers(), text: async () => JSON.stringify({ requestStatus: { statusCode: 22, statusDescription: 'INVALID_SESSION_ID_NOT_FOUND_STATUS' } }) };
+  };
+  const result = await pollSession({ state, token: 'jwt', deviceHashId: 'dev' });
+  assert.equal(result.transient, undefined);
+  assert.equal(result.info.sessionId, 'fresh-1');
+  assert.equal(result.info.status, 2);
+  assert.equal(result.effectiveBase, 'https://eu-netherlands-north.cloudmatchbeta.nvidiagrid.net/');
+  assert.equal(result.info.signalingUrl, 'wss://1.2.3.4:443/nvst/');
+});
+
+test('pollSession: 猶予超過+ディスカバリ不在 → 404 throw(→410 session_gone)', async (t) => {
+  const { pollSession } = await import('../src/cloudmatch.js');
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const state = YOUNG_STATE();
+  state.createdAt = Date.now() - 60_000;
+  globalThis.fetch = async () => ({
+    ok: false, status: 404, headers: new Headers(),
+    text: async () => JSON.stringify({ requestStatus: { statusCode: 22, statusDescription: 'INVALID_SESSION_ID_NOT_FOUND_STATUS' } }),
+  });
+  await assert.rejects(
+    () => pollSession({ state, token: 'jwt', deviceHashId: 'dev' }),
+    (error) => error.status === 404,
+  );
+});

@@ -10,6 +10,8 @@ import { UpstreamError, assertOk, fetchJson } from './upstream.js';
 
 const DEFAULT_STUN_SERVER = 'stun:s1.stun.gamestream.nvidia.com:19308';
 const CONFLICT_ERROR_CODE = '4AF1201E';
+/** 作成直後のpoll 404を「伝播待ち」とみなす猶予(ms) */
+const SESSION_PROPAGATION_GRACE_MS = 20_000;
 
 // ---------- 小さなヘルパー ----------
 
@@ -856,6 +858,7 @@ export async function pollSession({ state, token, deviceHashId }) {
   if (candidates.length === 0) throw new UpstreamError('invalid_params', 'No active session control endpoint');
 
   let lastError = null;
+  let allNotFound = true;
   for (const base of candidates) {
     let payload;
     try {
@@ -867,6 +870,7 @@ export async function pollSession({ state, token, deviceHashId }) {
       if (notFound) continue;
       throw error;
     }
+    allNotFound = false;
     let info = sessionInfo(payload, { fallbackBase: base.href, zone: state.zone, fallbackAppId: state.appId, deviceId: deviceHashId });
     // ゾーン基でstatus 2/3になったら、学習したserverIp直アドレスで再取得(cloudmatch.rs:196-215)
     if ([2, 3].includes(info.status) && isZoneHostname(base.hostname) && info.serverIp && !isZoneHostname(info.serverIp)) {
@@ -896,6 +900,37 @@ export async function pollSession({ state, token, deviceHashId }) {
       }
     }
     return { info, effectiveBase: base.href };
+  }
+
+  // 全候補基が404:
+  if (allNotFound) {
+    // (a) 作成直後は伝播待ちの可能性があるため猶予期間内は transient 扱いで polling を続行
+    //     (2026-09-29実測: 作成0.5秒後の初回pollが全基404 → 即410で誤キックの事例)
+    const ageMs = Number.isFinite(state.createdAt) ? Date.now() - Number(state.createdAt) : Infinity;
+    if (ageMs < SESSION_PROPAGATION_GRACE_MS && state.info) {
+      return { info: { ...state.info, pollTransient: true }, effectiveBase: null, transient: true };
+    }
+    // (b) LIST エンドポイントでセッションを探索(キュー転送で別ゾーンへ移動した場合、
+    //     単一IDのGETは404でも一覧には現れる — OpenNOW remote_sessions と同じ発想)
+    const listBases = [...candidates];
+    const prodBase = trustedCloudmatchBase(DEFAULT_STREAMING_URL);
+    if (prodBase && !listBases.some((c) => c.href === prodBase.href)) listBases.push(prodBase);
+    for (const base of listBases) {
+      try {
+        const listResult = await fetchJson(new URL('v2/session', base.href), { headers });
+        if (!listResult.ok) continue;
+        const sessions = Array.isArray(listResult.payload?.sessions) ? listResult.payload.sessions : [];
+        const entry = sessions.find((item) => item?.sessionId === state.sessionId);
+        if (entry) {
+          const info = sessionInfo({ session: entry }, {
+            fallbackBase: base.href, zone: state.zone, fallbackAppId: state.appId, deviceId: deviceHashId,
+          });
+          return { info, effectiveBase: base.href };
+        }
+      } catch {
+        /* 次の基へ */
+      }
+    }
   }
   throw lastError ?? new UpstreamError('session_error', 'Session polling failed on all candidate bases');
 }

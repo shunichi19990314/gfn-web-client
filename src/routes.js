@@ -360,6 +360,7 @@ export async function registerRoutes(app) {
     });
     store.setActiveSession(session.sid, {
       sessionId: info.sessionId,
+      createdAt: Date.now(), // poll 404の猶予判定に使用
       controlBase: info.streamingBaseUrl,
       pollBase: base.href, // 実際に作成に成功した基(404時のフォールバック起点)
       requestedBase: base.href,
@@ -384,8 +385,9 @@ export async function registerRoutes(app) {
     if (!limit(request, reply, 'session-poll', { max: 300, windowMs: 60_000 })) return;
     let info;
     let effectiveBase = null;
+    let transient = false;
     try {
-      ({ info, effectiveBase } = await pollSession({
+      ({ info, effectiveBase, transient } = await pollSession({
         state: active,
         token: sessionToken(session.tokens),
         deviceHashId: session.deviceHashId,
@@ -404,15 +406,17 @@ export async function registerRoutes(app) {
       }
       throw error;
     }
-    // 広告リストは作成直後のpollでしか届かないため、active state に保持して引き継ぐ
-    active.lastSessionAds = mergeAdStateForPoll(active.lastSessionAds ?? null, info);
-    active.info = info;
-    active.controlBase = info.streamingBaseUrl;
-    active.serverIp = info.serverIp;
-    active.resumePending = info.resumePending === true;
-    if (effectiveBase) active.pollBase = effectiveBase; // 成功した基を次回以降の第一候補に
-    store.setActiveSession(session.sid, active);
-    return { session: info };
+    if (!transient) {
+      // 広告リストは作成直後のpollでしか届かないため、active state に保持して引き継ぐ
+      active.lastSessionAds = mergeAdStateForPoll(active.lastSessionAds ?? null, info);
+      active.info = info;
+      active.controlBase = info.streamingBaseUrl;
+      active.serverIp = info.serverIp;
+      active.resumePending = info.resumePending === true;
+      if (effectiveBase) active.pollBase = effectiveBase; // 成功した基を次回以降の第一候補に
+      store.setActiveSession(session.sid, active);
+    }
+    return { session: info, transient: transient === true };
   });
 
   app.get('/api/session/active', async (request, reply) => {
@@ -486,6 +490,7 @@ export async function registerRoutes(app) {
     });
     store.setActiveSession(session.sid, {
       sessionId: info.sessionId,
+      createdAt: Date.now(),
       controlBase: info.streamingBaseUrl ?? controlBase.href,
       pollBase: controlBase.href,
       requestedBase: resolveProviderBase(session),
