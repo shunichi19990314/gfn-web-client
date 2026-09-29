@@ -547,6 +547,13 @@ export function upstreamErrorHandler(error, request, reply) {
   if (error?.statusCode === 429) {
     return reply.code(429).send({ error: 'rate_limited', message: error.message });
   }
+  // Fastify自体の4xx(ボディ解析エラー等)は500にせずそのまま返す
+  if (typeof error?.statusCode === 'number' && error.statusCode >= 400 && error.statusCode < 500) {
+    return reply.code(error.statusCode).send({
+      error: error.code ?? 'bad_request',
+      message: error.message,
+    });
+  }
   request.log.error({ err: error }, 'unhandled error');
   return reply.code(500).send({
     error: 'internal_error',

@@ -27,6 +27,22 @@ export async function buildApp({ logger = true } = {}) {
     Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_SERVICE_ID); // Railway
   app.decorate('productionCookieSecure', process.env.NODE_ENV === 'production' || onPaas);
 
+  // 空body + Content-Type: application/json を許容する。
+  // Fastifyはパーラより前段で FST_ERR_CTP_EMPTY_JSON_BODY を投げるため、
+  // onRequestフックで content-length: 0 のJSONリクエストから content-type を外す。
+  // フロント側でもbody無しのPOSTにContent-Typeを付けないよう修正済み(多層防御)。
+  app.addHook('onRequest', async (request) => {
+    const contentType = request.headers['content-type'];
+    if (typeof contentType !== 'string' || !contentType.includes('application/json')) return;
+    const cl = request.headers['content-length'];
+    const chunked = request.headers['transfer-encoding'] !== undefined;
+    // body が確実に空(content-length: 0 / 未設定 かつ chunked でない)なら
+    // content-type を外して Fastify の空JSONボディ拒否を回避する
+    if (!chunked && (cl === '0' || cl === undefined)) {
+      delete request.headers['content-type'];
+    }
+  });
+
   await app.register(fastifyCookie);
   await app.register(fastifyStatic, {
     root: PUBLIC_DIR,

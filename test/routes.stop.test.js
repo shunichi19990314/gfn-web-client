@@ -99,3 +99,46 @@ test('poll: tokens欠損でも500にならない', async (t) => {
   const res = await app.inject({ method: 'GET', url: '/api/session/poll', cookies: { gfnweb_sid: sid } });
   assert.notEqual(res.statusCode, 500, `must not 500, got ${res.statusCode}: ${res.body}`);
 });
+
+// ---- 空body POST(FastifyError: Body cannot be empty)の回帰テスト ----
+
+test('stop: Content-Type json + 空body でも 4xx/5xx にならない(実障害の再現)', async (t) => {
+  const app = await buildApp({ logger: false });
+  t.after(() => app.close());
+  const sid = seedSession();
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/session/stop',
+    headers: { 'content-type': 'application/json' }, // body無し
+    cookies: { gfnweb_sid: sid },
+  });
+  assert.equal(res.statusCode, 200, `body: ${res.body}`);
+  assert.equal(res.json().stopped, false);
+});
+
+test('logout: 空body POST でも 200', async (t) => {
+  const app = await buildApp({ logger: false });
+  t.after(() => app.close());
+  const sid = seedSession();
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/auth/logout',
+    headers: { 'content-type': 'application/json' },
+    cookies: { gfnweb_sid: sid },
+  });
+  assert.equal(res.statusCode, 200, `body: ${res.body}`);
+});
+
+test('壊れたJSON body は 400(500にしない)', async (t) => {
+  const app = await buildApp({ logger: false });
+  t.after(() => app.close());
+  const sid = seedSession();
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/session/stop',
+    headers: { 'content-type': 'application/json' },
+    payload: '{invalid json',
+    cookies: { gfnweb_sid: sid },
+  });
+  assert.equal(res.statusCode, 400, `body: ${res.body}`);
+});
