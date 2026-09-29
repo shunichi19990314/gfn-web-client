@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.1-ui2';
+export const APP_VERSION = 'v0.5.2-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -24,6 +24,15 @@ async function initVersionBadge() {
       }
     }
   } catch { /* healthz取得失敗は無視 */ }
+}
+
+function checkHtmlVersion() {
+  const htmlVersion = document.body?.dataset?.uiVersion;
+  if (htmlVersion && htmlVersion !== APP_VERSION) {
+    showStaleBanner(`HTML(${htmlVersion})とJS(${APP_VERSION})のバージョンが一致しません。`);
+    return false;
+  }
+  return true;
 }
 
 function showStaleBanner(detail) {
@@ -653,10 +662,25 @@ function setStreamStatus(text, detail = '') {
   $('stream-status-detail').textContent = detail;
 }
 
+// 内存リングバッファ: DOMの状態(古いHTMLキャッシュ等)に依存せず
+// 診断情報に必ずログを残す
+const LOG_BUFFER_MAX = 200;
+if (!Array.isArray(state.logBuffer)) state.logBuffer = [];
+function pushLogBuffer(text) {
+  state.logBuffer.push(text);
+  if (state.logBuffer.length > LOG_BUFFER_MAX) state.logBuffer.splice(0, state.logBuffer.length - LOG_BUFFER_MAX);
+}
+function clearLogBuffer() {
+  state.logBuffer = [];
+}
+
 function streamLog(message) {
+  const text = `[${new Date().toLocaleTimeString()}] ${message}`;
+  pushLogBuffer(text);
   const log = $('stream-log');
+  if (!log) return;
   const line = document.createElement('div');
-  line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+  line.textContent = text;
   log.appendChild(line);
   while (log.childElementCount > 200) log.removeChild(log.firstChild);
   log.scrollTop = log.scrollHeight;
@@ -664,21 +688,48 @@ function streamLog(message) {
 
 async function launchGame() {
   const game = state.launchGame;
-  if (!game?.launchAppId) return;
+  if (!game?.launchAppId) {
+    showToast('起動できません: このゲームには数値のlaunchAppIdがありません');
+    streamLog('launch aborted: no launchAppId');
+    return;
+  }
+  // 起動処理全体のガード: DOM不整合や予期しない同期例外でも
+  // 「静かに固まる」代わりに必ずログ+ステータスカードに出す
+  try {
+    await launchGameInner(game);
+  } catch (error) {
+    state.lastLaunchError = {
+      at: new Date().toISOString(),
+      status: error?.status ?? null,
+      code: error?.code ?? 'internal_error',
+      kind: error?.payload?.kind ?? null,
+      message: `${error?.name ?? 'Error'}: ${error?.message ?? error}`,
+    };
+    try {
+      streamLog(`launch INTERNAL ERROR: ${error?.name}: ${error?.message}`);
+      setStreamStatus('起動処理で内部エラーが発生しました', `${error?.name}: ${error?.message} — 診断情報ボタンで詳細をコピーできます`);
+      $('stream-status-card')?.classList.remove('hidden');
+    } catch { /* これも失敗したらconsoleへ */ console.error('launch failed', error); }
+  }
+}
+
+async function launchGameInner(game) {
   const settings = collectLaunchSettings();
+  // リージョン計算を最初に完了させる(TDZバグ防止: 表示文言より前に定義)
+  const selectedRegion = $('launch-region')?.value ?? 'auto';
+  try { localStorage.setItem(REGION_STORAGE_KEY, selectedRegion); } catch { /* ストレージ無効環境でも続行 */ }
+  const regionOption = $('launch-region')?.selectedOptions?.[0];
+  const regionText = selectedRegion === 'auto' ? '自動' : (regionOption?.dataset?.baseLabel ?? selectedRegion);
+
   showView('stream');
   setLaunchStep(1);
-  $('stream-log').innerHTML = '';
+  clearLogBuffer();
+  if ($('stream-log')) $('stream-log').innerHTML = '';
   $('stream-game-title').textContent = game.title;
   $('stream-session-meta').textContent = '';
   $('stream-stats').classList.add('hidden');
   $('stream-status-card').classList.remove('hidden');
   setStreamStatus('CloudMatchセッションを作成中…', `appId ${game.launchAppId} / ${settings.resolution}@${settings.fps} / ${settings.maxBitrateMbps}Mbps / リージョン: ${regionText}`);
-
-  const selectedRegion = $('launch-region').value;
-  localStorage.setItem(REGION_STORAGE_KEY, selectedRegion);
-  const regionOption = $('launch-region').selectedOptions[0];
-  const regionText = selectedRegion === 'auto' ? '自動' : (regionOption?.dataset?.baseLabel ?? selectedRegion);
   streamLog(`launch: POST /api/session/start appId=${game.launchAppId} region=${selectedRegion} ${settings.resolution}@${settings.fps}/${settings.maxBitrateMbps}Mbps`);
   let info;
   try {
@@ -1199,6 +1250,8 @@ async function exitStreamView() {
 // ---------- 初期化 ----------
 
 async function init() {
+  pushLogBuffer(`boot: js=${APP_VERSION} html=${document.body?.dataset?.uiVersion ?? 'unknown'} ua=${navigator.userAgent}`);
+  checkHtmlVersion();
   initVersionBadge();
   setLoginMode('qr');
   $('tab-qr').addEventListener('click', () => setLoginMode('qr'));
@@ -1233,7 +1286,7 @@ async function init() {
   // ストリームビュー
   $('stream-diag-btn')?.addEventListener('click', async () => {
     const info = state.stream?.sessionInfo ?? null;
-    const logLines = [...($('stream-log')?.children ?? [])].slice(-60).map((n) => n.textContent).join('\n');
+    const logLines = (state.logBuffer ?? []).slice(-80).join('\n');
     const dump = JSON.stringify({
       at: new Date().toISOString(),
       userAgent: navigator.userAgent,
@@ -1244,7 +1297,7 @@ async function init() {
       adRuntime: state.adRuntime ? { adId: state.adRuntime.adId, reportedFinish: state.adRuntime.reportedFinish, lastAction: state.adRuntime.lastAction, finished: [...(state.adRuntime.finishedIds ?? [])] } : null,
       logs: logLines.split('\n'),
     }, null, 2);
-    streamLog(`--- diagnostics (appVersion v4) ---\n${dump}`);
+    streamLog(`--- diagnostics (${APP_VERSION}) ---\n${dump}`);
     await copyText(dump);
   });
   $('stream-stop-btn').addEventListener('click', exitStreamView);
