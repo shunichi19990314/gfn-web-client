@@ -136,6 +136,15 @@
       <div class="stream-shell">
         <video id="stream-video" autoplay playsinline></video>
         <div id="stream-overlay" class="stream-overlay">
+          <div id="ad-overlay" class="ad-overlay hidden">
+            <video id="ad-video" class="ad-video hidden" playsinline></video>
+            <div id="ad-fallback" class="ad-fallback hidden">
+              <span class="ad-badge">Ad Break</span>
+              <p id="ad-fallback-text" class="muted"></p>
+            </div>
+            <button id="ad-play-btn" class="btn primary hidden" type="button">広告を再生</button>
+            <p id="ad-status" class="ad-status muted"></p>
+          </div>
           <div id="stream-status-card" class="stream-status-card">
             <div class="spinner"></div>
             <p id="stream-status-text">セッションを準備中…</p>

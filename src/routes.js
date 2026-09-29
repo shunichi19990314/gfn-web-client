@@ -8,6 +8,7 @@ import {
   SessionConflictError,
   claimSession,
   createSession,
+  mergeAdStateForPoll,
   pollSession,
   reportAd,
   resolveRequestedRegion,
@@ -337,6 +338,7 @@ export async function registerRoutes(app) {
       keyboardLayout: info.keyboardLayout,
       resumePending: false,
       requestedBase: base.href,
+      lastSessionAds: Array.isArray(info.adState?.sessionAds) && info.adState.sessionAds.length > 0 ? info.adState.sessionAds : null,
       info,
     });
     request.log.info({ sessionId: info.sessionId, zone, status: info.status }, 'CloudMatch session created');
@@ -354,6 +356,8 @@ export async function registerRoutes(app) {
       token: sessionToken(session.tokens),
       deviceHashId: session.deviceHashId,
     });
+    // 広告リストは作成直後のpollでしか届かないため、active state に保持して引き継ぐ
+    active.lastSessionAds = mergeAdStateForPoll(active.lastSessionAds ?? null, info);
     active.info = info;
     active.controlBase = info.streamingBaseUrl;
     active.serverIp = info.serverIp;
@@ -394,6 +398,7 @@ export async function registerRoutes(app) {
       token: sessionToken(session.tokens),
       deviceHashId: session.deviceHashId,
     });
+    active.lastSessionAds = mergeAdStateForPoll(active.lastSessionAds ?? null, info);
     active.info = info;
     active.controlBase = info.streamingBaseUrl;
     active.serverIp = info.serverIp;

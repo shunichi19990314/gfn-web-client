@@ -225,3 +225,79 @@ test('resolveRequestedRegion: 未指定/auto はプロバイダ既定', async ()
   assert.equal(resolveRequestedRegion('', fallback), fallback);
   assert.equal(resolveRequestedRegion('auto', fallback), fallback);
 });
+
+// ---- 無料枠キュー広告: adState 正規化とpoll間マージ ----
+
+function makeSessionPayload(sessionOverrides = {}) {
+  return {
+    requestStatus: { statusCode: 1 },
+    session: {
+      sessionId: 'sess-ad',
+      status: 1,
+      connectionInfo: [],
+      sessionRequestData: { appId: 1, clientRequestMonitorSettings: [{}] },
+      ...sessionOverrides,
+    },
+  };
+}
+
+const SI_OPTS = { fallbackBase: 'https://prod.cloudmatchbeta.nvidiagrid.net/', zone: 'z', fallbackAppId: '1', deviceId: 'd' };
+
+test('sessionInfo: 広告なし → adState null', () => {
+  const info = sessionInfo(makeSessionPayload(), SI_OPTS);
+  assert.equal(info.adState, null);
+  assert.equal(info.inQueue, false);
+});
+
+test('sessionInfo: seatSetupStep=1 → inQueue(true)', () => {
+  const info = sessionInfo(makeSessionPayload({ seatSetupInfo: { seatSetupStep: 1 } }), SI_OPTS);
+  assert.equal(info.inQueue, true);
+});
+
+test('sessionInfo: queuePosition>1 → inQueue / status2 → readyForConnect', () => {
+  const queued = sessionInfo(makeSessionPayload({ queuePosition: 5 }), SI_OPTS);
+  assert.equal(queued.inQueue, true);
+  assert.equal(queued.readyForConnect, false);
+  const ready = sessionInfo(makeSessionPayload({ status: 2 }), SI_OPTS);
+  assert.equal(ready.readyForConnect, true);
+});
+
+test('sessionInfo: sessionAdsRequired=true + sessionAds欠落 → serverSentEmptyAds', () => {
+  const info = sessionInfo(makeSessionPayload({
+    sessionAdsRequired: true,
+    seatSetupInfo: { seatSetupStep: 1 },
+    opportunity: { queuePaused: true, gracePeriodSeconds: 30, message: 'Watch an ad to skip the queue' },
+  }), SI_OPTS);
+  assert.equal(info.adState.isAdsRequired, true);
+  assert.equal(info.adState.serverSentEmptyAds, true);
+  assert.equal(info.adState.isQueuePaused, true);
+  assert.equal(info.adState.gracePeriodSeconds, 30);
+  assert.equal(info.adState.message, 'Watch an ad to skip the queue');
+  assert.deepEqual(info.adState.sessionAds, []);
+});
+
+test('sessionInfo: sessionAds 配列を透過', () => {
+  const ads = [{ adId: 'ad-1', adMediaFiles: [{ mediaFileUrl: 'https://cdn/ad1.mp4' }], adLengthInSeconds: 30 }];
+  const info = sessionInfo(makeSessionPayload({ sessionAds: ads }), SI_OPTS);
+  assert.equal(info.adState.isAdsRequired, true);
+  assert.equal(info.adState.serverSentEmptyAds, false);
+  assert.equal(info.adState.sessionAds[0].adId, 'ad-1');
+});
+
+test('mergeAdStateForPoll: serverSentEmptyAds時は前回リストを保持', async () => {
+  const { mergeAdStateForPoll } = await import('../src/cloudmatch.js');
+  const previousAds = [{ adId: 'ad-1', adUrl: 'https://cdn/ad1.mp4' }];
+  const info = { adState: { isAdsRequired: true, serverSentEmptyAds: true, sessionAds: [] } };
+  const merged = mergeAdStateForPoll(previousAds, info);
+  assert.deepEqual(merged, previousAds);
+  assert.deepEqual(info.adState.sessionAds, previousAds); // info に復元される
+});
+
+test('mergeAdStateForPoll: 新しいリストがあれば差し替え、広告なしは据え置き', async () => {
+  const { mergeAdStateForPoll } = await import('../src/cloudmatch.js');
+  const fresh = [{ adId: 'ad-2' }];
+  const info1 = { adState: { isAdsRequired: true, serverSentEmptyAds: false, sessionAds: fresh } };
+  assert.deepEqual(mergeAdStateForPoll([{ adId: 'old' }], info1), fresh);
+  const info2 = { adState: null };
+  assert.deepEqual(mergeAdStateForPoll(fresh, info2), fresh);
+});

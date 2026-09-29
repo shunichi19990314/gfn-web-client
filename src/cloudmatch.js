@@ -561,9 +561,31 @@ export function sessionInfo(payload, { fallbackBase, zone, fallbackAppId, device
   negotiated.enableHdr = acceptedHdrMode(session) === 1;
 
   const ads = Array.isArray(session?.sessionAds) ? session.sessionAds : [];
-  const adState = ads.length > 0
-    ? { active: true, ads: ads.map((ad) => ({ adId: firstString(ad?.adId), ...ad })) }
-    : { active: false, ads: [] };
+  // normalize_ad_state(cloudmatch.rs:1143-1168)+ Electron shared/gfn/session.ts の
+  // SessionAdState 型に準拠。serverSentEmptyAds は「サーバーが sessionAds=null を返した」
+  // 目印(広告リストは作成直後の1回目のpollでしか送られてこない — queueAds.ts mergeAdState)
+  const required =
+    session?.sessionAdsRequired === true ||
+    session?.isAdsRequired === true ||
+    session?.sessionProgress?.isAdsRequired === true ||
+    (session?.sessionAdsRequired === undefined &&
+      session?.isAdsRequired === undefined &&
+      session?.sessionProgress?.isAdsRequired === undefined &&
+      ads.length > 0);
+  const opportunity = session?.opportunity ?? null;
+  const adState =
+    !required && ads.length === 0 && opportunity === null
+      ? null
+      : {
+          isAdsRequired: required,
+          sessionAdsRequired: required,
+          serverSentEmptyAds: session?.sessionAds === null || session?.sessionAds === undefined,
+          isQueuePaused: opportunity?.queuePaused === true,
+          gracePeriodSeconds: opportunity?.gracePeriodSeconds ?? null,
+          message: opportunity?.message ?? opportunity?.description ?? null,
+          opportunity,
+          sessionAds: ads,
+        };
 
   return {
     sessionId,
@@ -573,6 +595,9 @@ export function sessionInfo(payload, { fallbackBase, zone, fallbackAppId, device
     phase: sessionPhase(status),
     queuePosition: queuePosition(session),
     seatSetupStep: valueI64(session?.seatSetupInfo?.seatSetupStep),
+    // isGfnSessionInQueue(shared/gfn/session.ts:279-284)
+    inQueue: valueI64(session?.seatSetupInfo?.seatSetupStep) === 1 || (queuePosition(session) ?? 0) > 1,
+    readyForConnect: status === 2 || status === 3,
     adState,
     zone,
     streamingBaseUrl: controlBase,
@@ -847,9 +872,10 @@ export async function reportAd({ state, params, token, deviceHashId }) {
     clientTimestamp: Number(params.clientTimestamp ?? Math.floor(Date.now() / 1000)),
   };
   for (const key of ['watchedTimeInMs', 'pausedTimeInMs']) {
-    if (Number.isFinite(Number(params[key]))) update[key] = Math.max(0, Number(params[key]));
+    if (params[key] !== undefined && Number.isFinite(Number(params[key]))) update[key] = Math.max(0, Number(params[key]));
   }
   if (typeof params.cancelReason === 'string') update.cancelReason = params.cancelReason;
+  if (typeof params.errorInfo === 'string') update.errorInfo = params.errorInfo;
   const url = new URL(`v2/session/${state.sessionId}`, base.href);
   const result = await fetchJson(url, {
     method: 'PUT',
@@ -858,4 +884,25 @@ export async function reportAd({ state, params, token, deviceHashId }) {
   });
   const payload = validateCloudmatchResponse('Session ad update failed', result.status, result.payload, {});
   return sessionInfo(payload, { fallbackBase: base.href, zone: state.zone, fallbackAppId: state.appId, deviceId: deviceHashId });
+}
+
+
+/**
+ * poll間の広告リスト保持(queueAds.ts mergeAdState の移植)
+ * サーバーは sessionAds を「作成後最初のpoll」でしか送らない。以降のpollは
+ * sessionAdsRequired=true かつ sessionAds=null(serverSentEmptyAds)になるため、
+ * メディアURL入りの前回リストを保持し続ける必要がある。
+ * @param {Array|null} previousAds 前回保持した広告リスト
+ * @param {object} info pollSession/報告応答のsession info(adStateを書き換える)
+ * @returns {Array|null} 次に保持する広告リスト
+ */
+export function mergeAdStateForPoll(previousAds, info) {
+  const adState = info?.adState;
+  if (!adState) return previousAds ?? null;
+  const current = Array.isArray(adState.sessionAds) ? adState.sessionAds : [];
+  if (adState.isAdsRequired && adState.serverSentEmptyAds && current.length === 0 && previousAds?.length) {
+    adState.sessionAds = previousAds;
+    return previousAds;
+  }
+  return current.length > 0 ? current : previousAds ?? null;
 }

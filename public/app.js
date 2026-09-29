@@ -18,6 +18,7 @@ const state = {
   launchGame: null, // 起動対象のゲーム
   regionsForLaunch: null, // /api/regions のキャッシュ
   stream: null, // { gfnStream, signaling, pollTimer, sessionInfo, startedAt }
+  adRuntime: null, // { adId, index, lastAction, startedAtMs, wasPaused, startWatchdog, stuckWatchdog, lastProgressTs, reportedFinish }
 };
 
 // ---------- ユーティリティ ----------
@@ -733,20 +734,273 @@ function startSessionPolling() {
 function updateSessionUi(info) {
   const meta = [info.zone, info.gpuType, info.serverLocation].filter(Boolean).join(' / ');
   $('stream-session-meta').textContent = meta;
-  if (info.queuePosition) {
-    setStreamStatus('待機行列にいます…', `現在地: ${info.queuePosition} 番目 / status=${info.status}`);
-  } else if (info.adState?.active) {
-    setStreamStatus('広告の視聴が必要です(無料枠)', 'Phase 2Aでは広告再生に未対応です。セッションを終了してください。');
+
+  // 観測性: 生の状態をdetailに常時表示し、phase変化をログに残す
+  const detail = [
+    `status=${info.status} (${info.phase})`,
+    info.seatSetupStep != null ? `seatSetupStep=${info.seatSetupStep}` : null,
+    info.queuePosition ? `queue=${info.queuePosition}` : null,
+    info.adState?.isAdsRequired ? 'ads=required' : null,
+    info.adState?.isQueuePaused ? 'queuePaused' : null,
+    meta || null,
+  ].filter(Boolean).join(' / ');
+  const prevPhase = state.stream?.lastLoggedPhase;
+  if (state.stream && prevPhase !== `${info.status}:${info.phase}:${info.queuePosition ?? ''}:${info.adState?.isAdsRequired ?? ''}`) {
+    state.stream.lastLoggedPhase = `${info.status}:${info.phase}:${info.queuePosition ?? ''}:${info.adState?.isAdsRequired ?? ''}`;
+    streamLog(`session: ${detail}`);
+  }
+
+  if (info.readyForConnect) {
+    // beginStreaming 側でステータスを更新
+  } else if (info.inQueue && info.adState?.isAdsRequired) {
+    const ads = getPlayableAds(info);
+    const finishedIds = state.adRuntime?.finishedIds ?? new Set();
+    const pendingAds = ads.filter((ad) => !finishedIds.has(ad.adId));
+    if (ads.length > 0 && pendingAds.length === 0) {
+      setStreamStatus('広告の視聴が完了しました。GPUサーバーの割り当てを待っています…', detail);
+    } else if (ads.length > 0) {
+      setStreamStatus(info.queuePosition ? `待機行列 ${info.queuePosition} 番目 — 広告を再生します(無料枠)` : '広告を再生します(無料枠のキュー広告)', detail);
+    } else {
+      setStreamStatus('Ad Break — 広告メディアを待機中…', `${detail} / 広告が届かない場合、そのまま通常キューで進行することがあります`);
+      showAdFallback('広告メディアの配信を待っています。このままお待ちください(通常キューで進行する場合もあります)。');
+    }
+    handleQueueAds(info);
+  } else if (info.inQueue || info.queuePosition) {
+    setStreamStatus(info.queuePosition ? `待機行列にいます… ${info.queuePosition} 番目` : '待機行列にいます…', detail);
+    hideAdOverlay();
+  } else if (info.phase === 'paused') {
+    setStreamStatus('セッションが一時停止中です', detail);
   } else if (info.phase === 'resuming') {
-    setStreamStatus('セッションを再開中…', `status=${info.status}`);
-  } else if (info.phase === 'preparing' || info.phase === 'requesting') {
-    setStreamStatus('GPUサーバーを準備中…', `status=${info.status} ${meta}`);
+    setStreamStatus('セッションを再開中…', detail);
+  } else {
+    setStreamStatus('GPUサーバーを準備中…', detail);
+    // 90秒以上 preparing ならヒント表示
+    const elapsed = state.stream ? (Date.now() - state.stream.startedAt) / 1000 : 0;
+    if (elapsed > 90) {
+      setStreamStatus('準備に時間がかかっています…', `${detail} — 無料枠は広告再生が必要な場合があり、混雑時は数分待つことがあります。リージョンを変えて再試行するのも有効です。`);
+    }
+  }
+}
+
+// ---------- 無料枠キュー広告ランタイム(useQueueAdRuntime.ts の簡約移植) ----------
+
+const AD_START_TIMEOUT_MS = 30000; // 再生開始ウォッチドッグ
+const AD_STUCK_TIMEOUT_MS = 30000; // 再生停止ウォッチドッグ
+
+/** adMediaFiles[].mediaFileUrl → adUrl → mediaUrl の優先順(getPreferredSessionAdMediaUrl準拠) */
+function getAdMediaUrl(ad) {
+  return ad?.adMediaFiles?.find((f) => f?.mediaFileUrl)?.mediaFileUrl ?? ad?.adUrl ?? ad?.mediaUrl ?? null;
+}
+
+function getPlayableAds(info) {
+  return (info.adState?.sessionAds ?? []).filter((ad) => ad?.adId && getAdMediaUrl(ad));
+}
+
+function showAdFallback(text) {
+  $('ad-overlay').classList.remove('hidden');
+  $('ad-video').classList.add('hidden');
+  $('ad-fallback').classList.remove('hidden');
+  $('ad-fallback-text').textContent = text;
+  $('ad-play-btn').classList.add('hidden');
+}
+
+function hideAdOverlay() {
+  $('ad-overlay').classList.add('hidden');
+  $('ad-fallback').classList.add('hidden');
+  $('ad-play-btn').classList.add('hidden');
+  const video = $('ad-video');
+  video.classList.add('hidden');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  clearAdWatchdogs();
+  state.adRuntime = null;
+}
+
+function clearAdWatchdogs() {
+  const runtime = state.adRuntime;
+  if (!runtime) return;
+  if (runtime.startWatchdog) clearTimeout(runtime.startWatchdog);
+  if (runtime.stuckWatchdog) clearInterval(runtime.stuckWatchdog);
+  runtime.startWatchdog = null;
+  runtime.stuckWatchdog = null;
+}
+
+function handleQueueAds(info) {
+  const ads = getPlayableAds(info);
+  if (ads.length === 0) return; // フォールバック表示は updateSessionUi 側
+  const runtime = state.adRuntime;
+  const finishedIds = runtime?.finishedIds ?? new Set();
+  const pending = ads.filter((ad) => !finishedIds.has(ad.adId));
+  if (pending.length === 0) return; // 全広告視聴済み → GPU割り当て待ち
+  const ad = pending[0];
+  // 同じ広告を再生中(finish/cancel未報告)なら何もしない
+  if (runtime?.adId === ad.adId && !runtime.reportedFinish) return;
+  startAdPlayback(ad, ads.indexOf(ad), ads.length);
+}
+
+async function startAdPlayback(ad, index, total) {
+  clearAdWatchdogs();
+  const previousFinished = state.adRuntime?.finishedIds ?? new Set();
+  state.adRuntime = {
+    adId: ad.adId,
+    index,
+    lastAction: null,
+    startedAtMs: null,
+    wasPaused: false,
+    reportedFinish: false,
+    startWatchdog: null,
+    stuckWatchdog: null,
+    lastProgressTs: Date.now(),
+    finishedIds: previousFinished,
+  };
+  const runtime = state.adRuntime;
+  const overlay = $('ad-overlay');
+  const video = $('ad-video');
+  const playBtn = $('ad-play-btn');
+  const statusEl = $('ad-status');
+  overlay.classList.remove('hidden');
+  $('ad-fallback').classList.add('hidden');
+  $('stream-status-card').classList.add('hidden');
+  video.classList.remove('hidden');
+  playBtn.classList.add('hidden');
+  statusEl.textContent = `広告 ${index + 1}/${total} を読み込み中… (広告を再生するとキューが進行します)`;
+  streamLog(`ad: loading ${ad.adId} (${getAdMediaUrl(ad)})`);
+
+  const onPlaying = () => {
+    if (runtime.reportedFinish) return;
+    if (!runtime.startedAtMs) {
+      runtime.startedAtMs = Date.now();
+      reportAdAction('start', ad);
+      statusEl.textContent = `広告 ${index + 1}/${total} を再生中… (最後まで視聴するとセッションが進みます)`;
+    } else if (runtime.lastAction === 'pause') {
+      reportAdAction('resume', ad);
+    }
+    runtime.lastProgressTs = Date.now();
+  };
+  const onPause = () => {
+    if (runtime.reportedFinish || !runtime.startedAtMs) return;
+    if (runtime.lastAction === 'start' || runtime.lastAction === 'resume') {
+      runtime.wasPaused = true;
+      reportAdAction('pause', ad);
+    }
+  };
+  const onTimeUpdate = () => { runtime.lastProgressTs = Date.now(); };
+  const onEnded = () => {
+    if (runtime.reportedFinish) return;
+    runtime.reportedFinish = true;
+    runtime.finishedIds.add(ad.adId);
+    clearAdWatchdogs();
+    const watchedTimeInMs = Math.max(0, Math.round((video.currentTime || 0) * 1000));
+    reportAdAction('finish', ad, { watchedTimeInMs });
+    statusEl.textContent = '広告視聴完了を報告しました。キューの進行を待っています…';
+    streamLog(`ad: finished ${ad.adId} (watched ${watchedTimeInMs}ms)`);
+    video.pause();
+    video.classList.add('hidden');
+  };
+  const onError = () => {
+    if (runtime.reportedFinish) return;
+    clearAdWatchdogs();
+    streamLog(`ad: media error ${ad.adId}`);
+    if (state.adRuntime) { state.adRuntime.reportedFinish = true; state.adRuntime.finishedIds.add(ad.adId); }
+    reportAdAction('cancel', ad, { cancelReason: 'error', errorInfo: 'Error loading url' });
+    statusEl.textContent = '広告の読み込みに失敗したためスキップを報告しました。';
+    video.classList.add('hidden');
+  };
+
+  video.onplaying = onPlaying;
+  video.onpause = onPause;
+  video.ontimeupdate = onTimeUpdate;
+  video.onended = onEnded;
+  video.onerror = onError;
+  video.src = getAdMediaUrl(ad);
+
+  // 自動再生(音声あり→ミュート→手動ボタン)
+  const tryPlay = async (muted) => {
+    video.muted = muted;
+    try {
+      await video.play();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!(await tryPlay(false)) && !(await tryPlay(true))) {
+    playBtn.classList.remove('hidden');
+    statusEl.textContent = 'ブラウザが自動再生をブロックしました。ボタンを押して広告を開始してください。';
+    playBtn.onclick = async () => {
+      playBtn.classList.add('hidden');
+      if (!(await tryPlay(false))) await tryPlay(true);
+    };
+  }
+
+  // ウォッチドッグ: 30秒以内に再生開始しなければ cancel 報告('Ad play timeout')
+  runtime.startWatchdog = setTimeout(() => {
+    const rt = state.adRuntime;
+    if (!rt || rt.adId !== ad.adId || rt.startedAtMs || rt.reportedFinish) return;
+    streamLog(`ad: start timeout ${ad.adId}`);
+    if (state.adRuntime) { state.adRuntime.reportedFinish = true; state.adRuntime.finishedIds.add(ad.adId); }
+    reportAdAction('cancel', ad, { cancelReason: 'error', errorInfo: 'Ad play timeout' });
+    statusEl.textContent = '広告が開始しなかったためスキップを報告しました。';
+    video.classList.add('hidden');
+  }, AD_START_TIMEOUT_MS);
+  // ウォッチドッグ: 再生中に30秒進まなければ cancel 報告('Ad video is stuck')
+  runtime.stuckWatchdog = setInterval(() => {
+    const rt = state.adRuntime;
+    if (!rt || rt.adId !== ad.adId || !rt.startedAtMs || rt.reportedFinish) return;
+    if (Date.now() - rt.lastProgressTs > AD_STUCK_TIMEOUT_MS) {
+      streamLog(`ad: stuck ${ad.adId}`);
+    if (state.adRuntime) { state.adRuntime.reportedFinish = true; state.adRuntime.finishedIds.add(ad.adId); }
+      reportAdAction('cancel', ad, { cancelReason: 'error', errorInfo: 'Ad video is stuck' });
+      statusEl.textContent = '広告が停止したためスキップを報告しました。';
+      video.classList.add('hidden');
+    }
+  }, 1000);
+}
+
+/** 広告アクションを報告(PUT action:6)。応答のセッション状態を即座に反映 */
+async function reportAdAction(action, ad, extra = {}) {
+  const runtime = state.adRuntime;
+  if (runtime) runtime.lastAction = action;
+  let pausedTimeInMs = 0;
+  if (runtime?.startedAtMs && runtime.wasPaused) {
+    const adLengthMs = Number(ad?.adLengthInSeconds) > 0 ? ad.adLengthInSeconds * 1000 : (ad?.durationMs ?? 0);
+    const elapsed = Date.now() - runtime.startedAtMs;
+    if (adLengthMs > 0 && elapsed > adLengthMs) pausedTimeInMs = Math.round(elapsed - adLengthMs);
+  }
+  const body = {
+    action,
+    adId: ad.adId,
+    clientTimestamp: Math.floor(Date.now() / 1000),
+    pausedTimeInMs,
+    ...extra,
+  };
+  if (extra.watchedTimeInMs === undefined && (action === 'finish' || action === 'cancel')) {
+    body.watchedTimeInMs = 0;
+  }
+  streamLog(`ad: report ${action} ${ad.adId}`);
+  try {
+    const { session: info } = await api('/api/session/ad', { method: 'POST', body: JSON.stringify(body) });
+    if (state.stream) {
+      state.stream.sessionInfo = info;
+      updateSessionUi(info);
+      // 広告完了で即readyになる場合がある
+      if (info.readyForConnect && info.signalingUrl && !state.stream.gfnStream) {
+        if (state.stream.pollTimer) { clearTimeout(state.stream.pollTimer); state.stream.pollTimer = null; }
+        hideAdOverlay();
+        await beginStreaming(info);
+      }
+    }
+  } catch (error) {
+    streamLog(`ad: report failed (${error.message})`);
   }
 }
 
 async function beginStreaming(info) {
   const stream = state.stream;
   const settings = collectLaunchSettings();
+  hideAdOverlay();
+  $('stream-status-card').classList.remove('hidden');
   setStreamStatus('WebRTCシグナリング接続中…', info.signalingUrl);
   const signaling = new NvstSignalingClient(info.sessionId, { resolution: settings.resolution });
   const gfnStream = new GfnStream({
@@ -816,6 +1070,7 @@ async function stopStream({ silent = false } = {}) {
 }
 
 async function exitStreamView() {
+  hideAdOverlay();
   await stopStream();
   const stopBtn = $('stream-cancel-btn');
   stopBtn.textContent = 'キャンセル';

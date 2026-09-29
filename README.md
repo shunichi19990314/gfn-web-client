@@ -26,8 +26,14 @@ Phase 2A のスコープ(映像受信まで):
 - ✅ **サーバーリージョン選択**(起動モーダルから `v2/serverInfo` のリージョン一覧を選択、
   都市名の推定表示・★local マーク・no-cors fetchによる遅延計測ボタン付き。選択はlocalStorageに保存され、
   明示指定時はそのゾーン基(例 `np-tyo-01.cloudmatchbeta.nvidiagrid.net`)へ直接セッション作成)
+- ✅ **無料枠のキュー広告フロー**(旧Electron版 useQueueAdRuntime/queueAds の簡約移植):
+  待機行列中(`seatSetupStep=1` または `queuePosition>1`)に `sessionAdsRequired` なら
+  広告ビデオを自動再生し、`start/pause/resume/finish` を `PUT v2/session/{id}` (action:6) で報告。
+  再生失敗/30秒無応答は `cancel`(errorInfo付き)でスキップ報告し通常キューへ。
+  広告リストは作成直後のpollでしか届かないため、サーバー側で前回リストを保持(mergeAdStateForPoll)。
+  自動再生ブロック時は「広告を再生」ボタンを表示
 - ⛔ **入力送信(キー/マウス/ゲームパッド)はPhase 2B**。映像視聴のみで操作不可
-- ⛔ 無料枠の広告再生(sessionAds)未対応、HEVC/AV1は未検証(H264優先固定)、ストア連携(Phase 5)
+- ⛔ HEVC/AV1は未検証(H264優先固定)、ストア連携(Phase 5)
 
 > **免責**: NVIDIA非公式クライアントです。GeForce NOW利用規約に抵触する可能性があり、
 > アカウントリスク・API仕様変更による破損リスクがあります。検証はサブアカウントで。
