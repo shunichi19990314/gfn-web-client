@@ -368,3 +368,34 @@ test('pollSession: 制御基が404なら作成基へフォールバックし eff
   assert.equal(info.signalingUrl, 'wss://1.2.3.4:443/nvst/');
   assert.equal(info.iceServers.length, 1); // TURNが返る(フォールバックSTUNではない)
 });
+
+// ---- poll 全候補404 → session_gone変換用の404送出 ----
+
+test('pollSession: 全候補基が404 → status 404 のエラー(routesがsession_goneに変換)', async (t) => {
+  const { pollSession } = await import('../src/cloudmatch.js');
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const hits = [];
+  globalThis.fetch = async (url) => {
+    hits.push(String(url));
+    return {
+      ok: false, status: 404, headers: new Headers(),
+      text: async () => JSON.stringify({ requestStatus: { statusCode: 22, statusDescription: 'INVALID_SESSION_ID_NOT_FOUND_STATUS 8A8C2000' } }),
+    };
+  };
+  const state = {
+    sessionId: 'dead-session',
+    controlBase: 'https://np-bom-01.cloudmatchbeta.nvidiagrid.net',
+    requestedBase: 'https://us-oregon.cloudmatchbeta.nvidiagrid.net/',
+    serverIp: null,
+    zone: 'ap-india.cloudmatchbeta.nvidiagrid.net',
+    appId: '9',
+  };
+  await assert.rejects(
+    () => pollSession({ state, token: 'jwt', deviceHashId: 'dev' }),
+    (error) => error.status === 404,
+  );
+  // 制御基と作成基の両方を試した
+  assert.ok(hits.some((h) => h.includes('np-bom-01')));
+  assert.ok(hits.some((h) => h.includes('us-oregon')));
+});

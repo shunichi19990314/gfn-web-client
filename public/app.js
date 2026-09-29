@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.3-ui2';
+export const APP_VERSION = 'v0.5.4-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -535,6 +535,46 @@ const ZONE_CITY_NAMES = {
   SGP: 'シンガポール', SYD: 'シドニー', MEL: 'メルボルン', AKL: 'オークランド',
 };
 
+// サーバー側プロキシの local-region は「Railwayサーバーの出口IP」の地理で決まり、
+// ユーザーの場所とは無関係(実測で India が返る)。そのため既定は
+// ブラウザのタイムゾーンから推奨リージョンを推定して明示指定する。
+const TZ_TO_REGION_NAME = {
+  'Asia/Tokyo': 'Japan',
+  'Asia/Seoul': 'Japan', // 韓国リージョンは現行リストに無いため日本を推奨
+  'Asia/Kolkata': 'India',
+  'Asia/Calcutta': 'India',
+  'Asia/Singapore': 'India', // SGリージョン無し→地理的に近い India(リストにあれば優先)
+  'Europe/London': 'United Kingdom 1',
+  'Europe/Dublin': 'United Kingdom 1',
+  'Europe/Stockholm': 'Sweden',
+  'Europe/Amsterdam': 'Netherlands North',
+  'Europe/Warsaw': 'Poland',
+  'Europe/Sofia': 'Bulgaria',
+  'Europe/Paris': 'France 1',
+  'Europe/Berlin': 'Germany',
+  'America/Toronto': 'Ontario (Canada)',
+  'America/Montreal': 'Quebec (Canada)',
+  'America/Los_Angeles': 'Southern California (USA)',
+  'America/Phoenix': 'Arizona (USA)',
+  'America/Chicago': 'Illinois (USA)',
+  'America/New_York': 'New Jersey (USA)',
+  'America/Sao_Paulo': null,
+};
+
+function detectPreferredRegionName() {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
+    if (TZ_TO_REGION_NAME[tz] !== undefined) return TZ_TO_REGION_NAME[tz];
+    // 表に無いTZ: 米国の一般的なtzは都市名から推定
+    if (tz.startsWith('America/')) return null;
+    if (tz.startsWith('Europe/')) return 'Germany';
+    if (tz.startsWith('Asia/')) return 'Japan';
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function regionLabel(region) {
   // "NP-TYO-01" / "np-tyo-01.cloudmatchbeta..." → 都市名(推定)+ 原名
   const name = region.name ?? '';
@@ -563,28 +603,34 @@ function renderRegionOptions(select, info, saved) {
   select.innerHTML = '';
   const auto = document.createElement('option');
   auto.value = 'auto';
-  auto.textContent = '自動(サーバーにおまかせ)';
+  auto.textContent = '自動(サーバー所在地で判定 — 非推奨)';
   select.appendChild(auto);
   const regions = info.regions ?? [];
-  // local-region を先頭に
+  const preferredName = detectPreferredRegionName();
+  const preferred = preferredName ? regions.find((r) => r.name === preferredName) ?? null : null;
+  // 推奨 → local-region → その他の順
   const sorted = [...regions].sort((a, b) => {
-    const la = a.name === info.localRegion ? 0 : 1;
-    const lb = b.name === info.localRegion ? 0 : 1;
-    return la - lb || a.name.localeCompare(b.name);
+    const rank = (r) => (preferred && r.name === preferred.name ? 0 : r.name === info.localRegion ? 1 : 2);
+    return rank(a) - rank(b) || a.name.localeCompare(b.name);
   });
   let savedExists = false;
   for (const region of sorted) {
     const option = document.createElement('option');
     option.value = region.url;
-    const local = region.name === info.localRegion ? ' ★local' : '';
-    const baseLabel = `${regionLabel(region)}${local}`;
+    const marker = preferred && region.name === preferred.name
+      ? ' ★推奨(ブラウザのタイムゾーン判定)'
+      : region.name === info.localRegion
+        ? ' (サーバー側local — あなたの所在地とは無関係)'
+        : '';
+    const baseLabel = `${regionLabel(region)}${marker}`;
     option.dataset.baseLabel = baseLabel;
     option.textContent = baseLabel;
     option.dataset.regionName = region.name;
     if (region.url === saved) savedExists = true;
     select.appendChild(option);
   }
-  select.value = savedExists ? saved : 'auto';
+  // 保存済み選択 > 推奨リージョン > auto
+  select.value = savedExists ? saved : (preferred?.url ?? 'auto');
 }
 
 async function measureRegionLatency() {
@@ -713,7 +759,7 @@ async function launchGame() {
   }
 }
 
-async function launchGameInner(game) {
+async function launchGameInner(game, opts = {}) {
   const settings = collectLaunchSettings();
   // リージョン計算を最初に完了させる(TDZバグ防止: 表示文言より前に定義)
   const selectedRegion = $('launch-region')?.value ?? 'auto';
@@ -745,7 +791,17 @@ async function launchGameInner(game) {
   } catch (error) {
     if (error.code === 'session_conflict') {
       if (error.payload?.session?.sessionId) {
-        // 同一ブラウザの既存セッション → それに復帰
+        // 同一ブラウザの残存セッション。ゾンビ(上流で失効)の可能性があるため、
+        // 黙って復帰せず「停止→1回だけ再作成」を優先する
+        if (!opts.retriedAfterConflict) {
+          streamLog(`conflict: stale session ${error.payload.session.sessionId} → stopping and retrying once`);
+          setStreamStatus('古いセッションを停止して、作り直しています…');
+          try { await api('/api/session/stop', { method: 'POST' }); } catch (stopError) {
+            streamLog(`conflict: stop failed (${stopError.message}) — retrying anyway`);
+          }
+          return launchGameInner(game, { retriedAfterConflict: true });
+        }
+        // 再作成しても競合 → そのセッションに復帰
         state.stream = { gfnStream: null, signaling: null, pollTimer: null, sessionInfo: error.payload.session, startedAt: Date.now() };
         setStreamStatus('既存セッションに復帰します…');
         startSessionPolling();
@@ -840,6 +896,12 @@ function startSessionPolling() {
     try {
       ({ session: info } = await api('/api/session/poll', {}, 15000));
     } catch (error) {
+      if (error.code === 'session_gone') {
+        streamLog('poll: session_gone — サーバー側でセッション失効。ライブラリに戻ります');
+        showToast('セッションがサーバー側で失効しました。もう一度起動してください。', 8000);
+        await exitStreamView();
+        return;
+      }
       try {
         setStreamStatus('ポーリング失敗 — 自動再試行します', error.message);
         streamLog(`poll error: ${error.message}`);
@@ -1250,7 +1312,7 @@ async function exitStreamView() {
 // ---------- 初期化 ----------
 
 async function init() {
-  pushLogBuffer(`boot: js=${APP_VERSION} html=${document.body?.dataset?.uiVersion ?? 'unknown'} ua=${navigator.userAgent}`);
+  pushLogBuffer(`boot: js=${APP_VERSION} html=${document.body?.dataset?.uiVersion ?? 'unknown'} tz=${Intl.DateTimeFormat().resolvedOptions().timeZone} preferredRegion=${detectPreferredRegionName() ?? 'auto'} ua=${navigator.userAgent}`);
   checkHtmlVersion();
   initVersionBadge();
   setLoginMode('qr');

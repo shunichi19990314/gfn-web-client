@@ -359,11 +359,28 @@ export async function registerRoutes(app) {
     const active = requireActiveSession(session.sid, reply);
     if (!active) return;
     if (!limit(request, reply, 'session-poll', { max: 300, windowMs: 60_000 })) return;
-    const { info, effectiveBase } = await pollSession({
-      state: active,
-      token: sessionToken(session.tokens),
-      deviceHashId: session.deviceHashId,
-    });
+    let info;
+    let effectiveBase = null;
+    try {
+      ({ info, effectiveBase } = await pollSession({
+        state: active,
+        token: sessionToken(session.tokens),
+        deviceHashId: session.deviceHashId,
+      }));
+    } catch (error) {
+      // 全候補基で404(INVALID_SESSION_ID_NOT_FOUND)= サーバー側でセッション消滅。
+      // ローカルのアクティブ状態を解放しないと、以降の起動が409競合ループに陥る
+      if (error?.status === 404) {
+        store.clearActiveSession(session.sid);
+        request.log.warn({ sessionId: active.sessionId }, 'session gone upstream; cleared local state');
+        return reply.code(410).send({
+          error: 'session_gone',
+          message: 'このセッションはサーバー側で失効しています。ライブラリに戻って起動し直してください。',
+          sessionId: active.sessionId,
+        });
+      }
+      throw error;
+    }
     // 広告リストは作成直後のpollでしか届かないため、active state に保持して引き継ぐ
     active.lastSessionAds = mergeAdStateForPoll(active.lastSessionAds ?? null, info);
     active.info = info;
@@ -386,14 +403,21 @@ export async function registerRoutes(app) {
     if (!session) return;
     const active = store.getActiveSession(session.sid);
     if (!active) return { session: null, stopped: false };
-    const result = await stopSession({
-      state: active,
-      token: sessionToken(session.tokens),
-      deviceHashId: session.deviceHashId,
-    });
+    let result = { stopped: false };
+    let upstreamError = null;
+    try {
+      result = await stopSession({
+        state: active,
+        token: sessionToken(session.tokens),
+        deviceHashId: session.deviceHashId,
+      });
+    } catch (error) {
+      // 上流で停止できなくても、ローカル状態は必ず解放する(ゾンビ競合の防止)
+      upstreamError = error.message;
+    }
     store.clearActiveSession(session.sid);
-    request.log.info({ sessionId: active.sessionId }, 'CloudMatch session stopped');
-    return { session: null, stopped: result.stopped, sessionId: active.sessionId };
+    request.log.info({ sessionId: active.sessionId, stopped: result.stopped }, 'CloudMatch session stopped');
+    return { session: null, stopped: result.stopped, sessionId: active.sessionId, upstreamError };
   });
 
   app.post('/api/session/ad', async (request, reply) => {
