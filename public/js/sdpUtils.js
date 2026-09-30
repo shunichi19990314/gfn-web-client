@@ -36,11 +36,12 @@ export function extractPublicIp(hostOrIp) {
   return null;
 }
 
-/** offer SDP内の 0.0.0.0 ICE候補を実サーバーIPに置換(公式Webクライアント準拠: c=行は触らない) */
+/** offer SDP内の 0.0.0.0 ICE候補を実サーバーIPに置換(公式Webクライアント準拠: c=行は触らない)。
+ *  `a=candidate:` 行に加え、`a=` 無しの bare `candidate:` 行にも対応(2026-09実測のoffer形式対策) */
 export function fixServerIp(sdp, serverIp) {
   const ip = extractPublicIp(serverIp);
   if (!ip) return sdp;
-  return sdp.replace(/(a=candidate:\S+\s+\d+\s+\w+\s+\d+\s+)0\.0\.0\.0(\s+)/g, `$1${ip}$2`);
+  return sdp.replace(/((?:^|\r?\n)(?:a=)?candidate:\S+\s+\d+\s+\w+\s+\d+\s+)0\.0\.0\.0(\s+)/g, `$1${ip}$2`);
 }
 
 function normalizeWebRtcMediaConnectionInfo(mediaConnectionInfo) {

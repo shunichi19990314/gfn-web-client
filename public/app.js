@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.12-ui2';
+export const APP_VERSION = 'v0.5.13-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -723,7 +723,7 @@ function setStreamStatus(text, detail = '') {
 
 // 内存リングバッファ: DOMの状態(古いHTMLキャッシュ等)に依存せず
 // 診断情報に必ずログを残す
-const LOG_BUFFER_MAX = 200;
+const LOG_BUFFER_MAX = 400;
 if (!Array.isArray(state.logBuffer)) state.logBuffer = [];
 function pushLogBuffer(text) {
   state.logBuffer.push(text);
@@ -741,7 +741,7 @@ function streamLog(message) {
   const line = document.createElement('div');
   line.textContent = text;
   log.appendChild(line);
-  while (log.childElementCount > 200) log.removeChild(log.firstChild);
+  while (log.childElementCount > 400) log.removeChild(log.firstChild);
   log.scrollTop = log.scrollHeight;
 }
 
@@ -1449,7 +1449,7 @@ async function init() {
   // ストリームビュー
   $('stream-diag-btn')?.addEventListener('click', async () => {
     const info = state.stream?.sessionInfo ?? null;
-    const logLines = (state.logBuffer ?? []).slice(-80).join('\n');
+    const logLines = (state.logBuffer ?? []).slice(-250).join('\n');
     const dump = JSON.stringify({
       at: new Date().toISOString(),
       userAgent: navigator.userAgent,

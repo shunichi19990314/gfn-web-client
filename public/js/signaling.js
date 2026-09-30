@@ -144,8 +144,13 @@ export class NvstSignalingClient {
     try {
       peerPayload = JSON.parse(peerMessage);
     } catch {
+      this.#emit({ type: 'log', message: `peer_msg non-JSON: ${peerMessage.slice(0, 80)}` });
       return;
     }
+    this.#emit({
+      type: 'log',
+      message: `peer_msg received: ${peerPayload.type ?? (typeof peerPayload.candidate === 'string' ? 'candidate' : `keys=${Object.keys(peerPayload).join(',')}`)}`,
+    });
     if (peerPayload.type === 'offer' && typeof peerPayload.sdp === 'string') {
       this.#emit({ type: 'offer', sdp: peerPayload.sdp });
       return;

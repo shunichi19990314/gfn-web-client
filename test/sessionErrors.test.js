@@ -188,3 +188,22 @@ test('cleanupStaleSessions: キュー残り(status1)と自デバイスのみ削�
   assert.ok(deleted.some((d) => d.includes('mine-paused')));    // 自デバイスは状態問わず削除
   assert.ok(!deleted.some((d) => d.includes('streaming-other'))); // 他デバイスの配信中は絶対に残す
 });
+
+// ---- fixServerIp: bare candidate 行対応(v0.5.13) ----
+
+test('fixServerIp: a= なし candidate 行の 0.0.0.0 も置換', async () => {
+  const { fixServerIp } = await import('../public/js/sdpUtils.js');
+  const sdp = [
+    'v=0',
+    'm=video 9 UDP/TLS/RTP/SAVPF 96',
+    'c=IN IP4 0.0.0.0',
+    'candidate:1 1 udp 2130706431 0.0.0.0 50000 typ host',
+    'a=candidate:2 1 udp 1694498815 0.0.0.0 50001 typ srflx',
+    '',
+  ].join('\r\n');
+  const fixed = fixServerIp(sdp, '66-22-140-145.cloudmatchbeta.nvidiagrid.net');
+  assert.match(fixed, /candidate:1 1 udp 2130706431 66\.22\.140\.145 50000 typ host/);
+  assert.match(fixed, /a=candidate:2 1 udp 1694498815 66\.22\.140\.145 50001 typ srflx/);
+  // c= 行は公式クライアント同様に変えない
+  assert.match(fixed, /c=IN IP4 0\.0\.0\.0/);
+});

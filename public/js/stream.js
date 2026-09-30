@@ -13,6 +13,7 @@ import {
 } from './sdpUtils.js';
 import { buildNvstSdp } from './nvstSdp.js';
 
+
 const INPUT_HEARTBEAT = 2; // packetEncoding.ts — 生u32 LE(v3ラッパーなし)
 const HEARTBEAT_INTERVAL_MS = 2000;
 const DEFAULT_PARTIAL_RELIABLE_THRESHOLD_MS = 300;
@@ -34,6 +35,8 @@ export class GfnStream {
   #queuedRemoteIce = [];
   #fallbackStream = null;
   #remoteIceEndpoint = null;
+  #localCandidateCount = 0;
+  #remoteCandidateCount = 0;
   #riCapabilities = {
     partialReliableThresholdMs: DEFAULT_PARTIAL_RELIABLE_THRESHOLD_MS,
     hidDeviceMask: 0xffffffff,
@@ -98,6 +101,10 @@ export class GfnStream {
         sdpMLineIndex: payload.sdpMLineIndex,
         usernameFragment: payload.usernameFragment,
       };
+      this.#localCandidateCount += 1;
+      if (this.#localCandidateCount <= 6) {
+        this.log(`local candidate #${this.#localCandidateCount}: ${payload.candidate.slice(0, 90)}`);
+      }
       if (!this.#answerSent) {
         this.#queuedIce.push(candidate);
         return;
@@ -143,7 +150,11 @@ export class GfnStream {
           this.#callbacks.onError?.(`offer処理失敗: ${error.message}`);
         });
       } else if (event.type === 'remote-ice') {
-        this.#addRemoteIce(event.candidate).catch(() => {});
+        this.#addRemoteIce(event.candidate).catch((error) => {
+          this.log(`addIceCandidate FAILED: ${error?.message ?? error} (candidate: ${String(event.candidate?.candidate ?? '').slice(0, 70)})`);
+        });
+      } else if (event.type === 'log') {
+        this.log(`signaling: ${event.message}`);
       } else if (event.type === 'disconnected') {
         this.#callbacks.onError?.(`シグナリング切断: ${event.reason}`);
       } else if (event.type === 'connected') {
@@ -200,6 +211,16 @@ export class GfnStream {
     //   0.0.0.0 候補を書き換える。怠るとICEが 0.0.0.0 宛になり永遠に接続できず、
     //   サーバーがタイムアウトでシグナリングを切断する(2026-09-29 実障害)。
     let processedOffer = offerSdp;
+    // フォレンジック: 生offerの全行をログ(ICE問題の一次資料)
+    {
+      const lines = offerSdp.split(/\r?\n/).filter((l) => l.trim() !== '');
+      this.log(`offer SDP (${lines.length} lines):`);
+      for (const line of lines) this.log(`offer| ${line}`);
+      const aCand = lines.filter((l) => l.startsWith('a=candidate:')).length;
+      const bareCand = lines.filter((l) => /^candidate:/.test(l)).length;
+      const cZero = lines.filter((l) => l.startsWith('c=IN IP4 0.0.0.0')).length;
+      this.log(`offer analysis: a=candidate:${aCand} bare-candidate:${bareCand} c=0.0.0.0:${cZero}`);
+    }
     const rewriteIp = this.#remoteIceEndpoint?.ip ?? this.#session.serverIp ?? null;
     if (rewriteIp) {
       const zeroBefore = (processedOffer.match(/0\.0\.0\.0/g) ?? []).length;
@@ -277,6 +298,13 @@ export class GfnStream {
     });
     this.#signaling.sendAnswer({ sdp: finalSdp, nvstSdp });
     this.log(`Sent SDP answer + nvstSdp (codec=${negotiatedCodec})`);
+    setTimeout(() => {
+      if (this.#disposed) return;
+      this.log(`post-answer check: remoteCandidates=${this.#remoteCandidateCount} localCandidates=${this.#localCandidateCount} ice=${pc.iceConnectionState} conn=${pc.connectionState}`);
+      if (this.#remoteCandidateCount === 0) {
+        this.log('WARNING: サーバーからICE候補が1つも届いていない — サーバーはICE-liteではなく候補trickleもしない可能性。rtsps/RTSP系トランスポート(nvst_rtsp)を要求されている疑い');
+      }
+    }, 8000);
   }
 
   async #addRemoteIce(candidate) {
@@ -306,6 +334,10 @@ export class GfnStream {
       }
     }
     await pc.addIceCandidate(init);
+    this.#remoteCandidateCount += 1;
+    if (this.#remoteCandidateCount <= 6) {
+      this.log(`remote candidate #${this.#remoteCandidateCount} added: ${String(init.candidate).slice(0, 90)}`);
+    }
   }
 
   #startStatsPolling() {
