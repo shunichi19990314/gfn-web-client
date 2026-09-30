@@ -249,3 +249,28 @@ test('buildIceLiteHostCandidate: 合成候補の形式', async () => {
   // RTCIceCandidateInit として parse 可能な形式であること
   assert.match(cand, /^candidate:\d+ 1 udp \d+ \d+\.\d+\.\d+\.\d+ \d+ typ host$/);
 });
+
+// ---- 候補ポートフォリオ(v0.5.15) ----
+
+test('buildCandidatePortfolio: IP×ポートの直積を重複除去して生成', async () => {
+  const { buildCandidatePortfolio, extractRtspsPorts } = await import('../public/js/sdpUtils.js');
+  const portfolio = buildCandidatePortfolio(
+    ['66.22.134.145', '66.22.134.142', '66.22.134.145'], // 重複IP
+    [47998, 48322],
+  );
+  assert.equal(portfolio.length, 4); // 2IP × 2port
+  assert.equal(portfolio[0].candidate, 'candidate:1 1 udp 2130706431 66.22.134.145 47998 typ host');
+  assert.equal(portfolio[3].candidate, 'candidate:4 1 udp 2130706431 66.22.134.142 48322 typ host');
+  // rtsps エンドポイントからのポート抽出
+  const ports = extractRtspsPorts([
+    'rtsps://66-22-134-145.cloudmatchbeta.nvidiagrid.net:322',
+    'rtsps://66-22-134-145.cloudmatchbeta.nvidiagrid.net:48322',
+  ]);
+  assert.deepEqual(ports, [322, 48322]);
+});
+
+test('buildCandidatePortfolio: 空入力 → 空配列', async () => {
+  const { buildCandidatePortfolio } = await import('../public/js/sdpUtils.js');
+  assert.deepEqual(buildCandidatePortfolio([], [47998]), []);
+  assert.deepEqual(buildCandidatePortfolio(['1.2.3.4'], []), []);
+});

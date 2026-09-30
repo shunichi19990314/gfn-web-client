@@ -199,3 +199,42 @@ export function buildIceLiteHostCandidate(ip, port, foundation = 1) {
   // 一般的なhost候補の優先度(2130706431)で合成。component 1 (rtcp-mux)
   return `candidate:${foundation} 1 udp 2130706431 ${ip} ${port} typ host`;
 }
+
+
+/** rtsps:// URL群からポートを抽出 */
+export function extractRtspsPorts(rtspsEndpoints) {
+  const ports = [];
+  for (const ep of rtspsEndpoints ?? []) {
+    const match = String(ep).match(/:(\d+)\/?$/);
+    if (match) {
+      const port = Number.parseInt(match[1], 10);
+      if (Number.isFinite(port) && port > 0 && !ports.includes(port)) ports.push(port);
+    }
+  }
+  return ports;
+}
+
+/**
+ * ice-liteサーバー向け合成候補ポートフォリオ:
+ * 想定される全IP × 全ポートのhost候補を生成(重複除去)。
+ * ICEが全ペアを並行チェックし、応答のあったペアで接続が成立する。
+ */
+export function buildCandidatePortfolio(ips, ports) {
+  const candidates = [];
+  const seen = new Set();
+  let foundation = 1;
+  for (const ip of ips ?? []) {
+    for (const port of ports ?? []) {
+      const key = `${ip}:${port}`;
+      if (!ip || !port || seen.has(key)) continue;
+      seen.add(key);
+      candidates.push({
+        candidate: buildIceLiteHostCandidate(ip, port, foundation),
+        ip,
+        port,
+      });
+      foundation += 1;
+    }
+  }
+  return candidates;
+}

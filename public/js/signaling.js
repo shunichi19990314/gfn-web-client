@@ -15,6 +15,7 @@ export class NvstSignalingClient {
   #listeners = new Set();
   #resolution = '1920x1080';
   #sessionId;
+  #ackCount = 0;
 
   constructor(sessionId, { resolution } = {}) {
     this.#sessionId = sessionId;
@@ -122,6 +123,12 @@ export class NvstSignalingClient {
     if (typeof parsed.ackid === 'number') {
       const shouldAck = parsed.peer_info?.id !== this.#peerId;
       if (shouldAck) this.#sendJson({ ack: parsed.ackid });
+    }
+    if (typeof parsed.ack === 'number') {
+      this.#ackCount += 1;
+      if (this.#ackCount <= 5) {
+        this.#emit({ type: 'log', message: `server ack #${parsed.ack} (total ${this.#ackCount})` });
+      }
     }
     if (parsed.hb) {
       this.#sendJson({ hb: 1 });

@@ -2,6 +2,7 @@
 // 設計書 Phase 1: 認証プロキシ(デバイスフロー)+ ライブラリ表示 + 購読情報
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { resolve4 } from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import QRCode from 'qrcode';
@@ -38,6 +39,41 @@ import * as store from './store.js';
 
 const COOKIE_NAME = 'gfnweb_sid';
 const INSTANCE_ID = randomUUID(); // プロセス単位の疑似device_id(gfn.rs stable_device_id相当の代替)
+
+// メディアエンドポイント候補用のDNS解決キャッシュ(host → {ips, at})
+const dnsCache = new Map();
+const DNS_CACHE_TTL_MS = 5 * 60 * 1000;
+async function resolveHostIps(host) {
+  if (!host || /^\d+\.\d+\.\d+\.\d+$/.test(host)) return [];
+  const cached = dnsCache.get(host);
+  if (cached && Date.now() - cached.at < DNS_CACHE_TTL_MS) return cached.ips;
+  try {
+    const ips = await Promise.race([
+      resolve4(host),
+      new Promise((resolve) => setTimeout(() => resolve([]), 4000)),
+    ]);
+    dnsCache.set(host, { ips, at: Date.now() });
+    return ips;
+  } catch {
+    dnsCache.set(host, { ips: [], at: Date.now() });
+    return [];
+  }
+}
+
+/** ready系セッションに解決済みIP候補を付与(ice-lite候補合成のポートフォリオ用) */
+async function enrichResolvedIps(info, zone) {
+  if (!info || ![2, 3].includes(info.status)) return info;
+  const hosts = new Set();
+  if (info.serverIp && !/^\d+\.\d+\.\d+\.\d+$/.test(info.serverIp)) hosts.add(info.serverIp);
+  if (zone) hosts.add(zone);
+  const resolved = {};
+  for (const host of hosts) {
+    const ips = await resolveHostIps(host);
+    if (ips.length > 0) resolved[host] = ips;
+  }
+  if (Object.keys(resolved).length > 0) info.resolvedIps = resolved;
+  return info;
+}
 
 function clientIp(request) {
   return request.ip ?? 'unknown';
@@ -373,6 +409,7 @@ export async function registerRoutes(app) {
       lastSessionAds: Array.isArray(info.adState?.sessionAds) && info.adState.sessionAds.length > 0 ? info.adState.sessionAds : null,
       info,
     });
+    await enrichResolvedIps(info, zone);
     request.log.info({ sessionId: info.sessionId, zone, status: info.status, cleanedUp: cleanedUp?.length ?? 0 }, 'CloudMatch session created');
     reply.code(201).send({ session: info, cleanedUp: cleanedUp ?? [] });
   });
@@ -415,6 +452,7 @@ export async function registerRoutes(app) {
       active.serverIp = info.serverIp;
       active.resumePending = info.resumePending === true;
       if (effectiveBase) active.pollBase = effectiveBase; // 成功した基を次回以降の第一候補に
+      await enrichResolvedIps(info, active.zone);
       store.setActiveSession(session.sid, active);
     }
     return { session: info, transient: transient === true };

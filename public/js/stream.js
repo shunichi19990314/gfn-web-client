@@ -2,8 +2,10 @@
 // OpenNOW v0.5.5 (MIT) renderer/src/platforms/gfn/webrtcClient.ts の簡約移植
 // (映像受信+ハートビートまで。キー/マウス/ゲームパッド入力は Phase 2B)
 import {
+  buildCandidatePortfolio,
   buildIceLiteHostCandidate,
   extractIceCredentials,
+  extractRtspsPorts,
   extractMLinePorts,
   extractNegotiatedVideoCodec,
   extractPublicIp,
@@ -42,6 +44,7 @@ export class GfnStream {
   #remoteCandidateCount = 0;
   #offerHadCandidates = true;
   #offerMLinePorts = [];
+  #iceForensicsDone = false;
   #riCapabilities = {
     partialReliableThresholdMs: DEFAULT_PARTIAL_RELIABLE_THRESHOLD_MS,
     hidDeviceMask: 0xffffffff,
@@ -130,6 +133,10 @@ export class GfnStream {
     };
     pc.oniceconnectionstatechange = () => {
       this.log(`ICE: ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === 'failed' && !this.#iceForensicsDone) {
+        this.#iceForensicsDone = true;
+        this.#dumpIceFailureStats();
+      }
     };
 
     pc.ontrack = (event) => {
@@ -311,28 +318,7 @@ export class GfnStream {
     // これが無いとブラウザ側ICEはペアを形成できず "new" のままとなり、
     // サーバーが約16秒でシグナリングを切断する。
     if (!this.#offerHadCandidates && offerIsIceLite(processedOffer)) {
-      const serverIpRaw = this.#session.serverIp ?? null;
-      const serverIp = serverIpRaw ? extractPublicIp(serverIpRaw) : null;
-      const ports = this.#offerMLinePorts ?? [];
-      if (serverIp && ports.length > 0) {
-        let injected = 0;
-        for (const port of ports) {
-          const candidate = buildIceLiteHostCandidate(serverIp, port, injected + 1);
-          try {
-            await pc.addIceCandidate({ candidate, sdpMid: '0', sdpMLineIndex: 0 });
-            injected += 1;
-            this.#remoteCandidateCount += 1;
-            this.log(`ice-lite: injected synthesized host candidate → ${serverIp}:${port}`);
-          } catch (error) {
-            this.log(`ice-lite: inject FAILED for ${serverIp}:${port}: ${error?.message ?? error}`);
-          }
-        }
-        if (injected === 0) {
-          this.log('ice-lite: no candidates could be injected — ICE will not connect');
-        }
-      } else {
-        this.log(`ice-lite: cannot synthesize candidates (serverIp=${serverIpRaw} ports=${JSON.stringify(ports)})`);
-      }
+      await this.#injectIceLitePortfolio(pc);
     }
     setTimeout(() => {
       if (this.#disposed) return;
@@ -341,6 +327,73 @@ export class GfnStream {
         this.log('WARNING: サーバーからICE候補が1つも届いていない — サーバーはICE-liteではなく候補trickleもしない可能性。rtsps/RTSP系トランスポート(nvst_rtsp)を要求されている疑い');
       }
     }, 8000);
+  }
+
+  /**
+   * ice-liteサーバー向け候補ポートフォリオ注入(v0.5.15)
+   * メディアエンドポイントが応答から特定できない現行インフラでは、
+   * 既知の全IP(serverIpダッシュ変換 + DNS解決結果 + ゾーン基の解決結果)×
+   * 全ポート候補(m=行ポート + 2番目のusage-14ポート)を合成候補として注入し、
+   * ICEの並行チェックで「応答するペア」を発見させる。
+   */
+  async #injectIceLitePortfolio(pc) {
+    const session = this.#session;
+    const ips = [];
+    const addIp = (ip) => { if (ip && !ips.includes(ip)) ips.push(ip); };
+    addIp(extractPublicIp(session.serverIp ?? ''));
+    for (const list of Object.values(session.resolvedIps ?? {})) {
+      for (const ip of list ?? []) addIp(ip);
+    }
+    const ports = [];
+    for (const port of this.#offerMLinePorts ?? []) if (!ports.includes(port)) ports.push(port);
+    for (const port of extractRtspsPorts(session.rtspsEndpoints)) {
+      if (port !== 322 && !ports.includes(port)) ports.push(port); // 322はWS/RTSPのTCPポート
+    }
+    const portfolio = buildCandidatePortfolio(ips, ports);
+    this.log(`ice-lite portfolio: ips=[${ips.join(', ')}] ports=[${ports.join(', ')}] → ${portfolio.length} candidates`);
+    if (portfolio.length === 0) {
+      this.log('ice-lite: cannot synthesize candidates — ICE will not connect');
+      return;
+    }
+    let injected = 0;
+    for (const entry of portfolio) {
+      try {
+        await pc.addIceCandidate({ candidate: entry.candidate, sdpMid: '0', sdpMLineIndex: 0 });
+        injected += 1;
+        this.#remoteCandidateCount += 1;
+        this.log(`ice-lite: injected ${entry.ip}:${entry.port}`);
+      } catch (error) {
+        this.log(`ice-lite: inject FAILED ${entry.ip}:${entry.port}: ${error?.message ?? error}`);
+      }
+    }
+    this.log(`ice-lite: ${injected}/${portfolio.length} candidates injected`);
+  }
+
+  /** ICE失敗時のペア別フォレンジクス(getStats) */
+  async #dumpIceFailureStats() {
+    const pc = this.#pc;
+    if (!pc) return;
+    try {
+      const stats = await pc.getStats();
+      const candidates = new Map();
+      const pairs = [];
+      stats.forEach((report) => {
+        if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+          candidates.set(report.id, `${report.address ?? report.ip ?? '?'}:${report.port ?? '?'}(${report.candidateType ?? report.protocol ?? '?'})`);
+        }
+        if (report.type === 'candidate-pair') {
+          pairs.push(report);
+        }
+      });
+      this.log(`ICE failure forensics: ${pairs.length} pair(s)`);
+      for (const pair of pairs.slice(0, 12)) {
+        const local = candidates.get(pair.localCandidateId) ?? '?';
+        const remote = candidates.get(pair.remoteCandidateId) ?? '?';
+        this.log(`pair ${local} → ${remote}: state=${pair.state} nominated=${pair.nominated} reqSent=${pair.requestsSent ?? '-'} respRecv=${pair.responsesReceived ?? '-'} bytesRecv=${pair.bytesReceived ?? 0}`);
+      }
+    } catch (error) {
+      this.log(`ICE forensics failed: ${error?.message ?? error}`);
+    }
   }
 
   async #addRemoteIce(candidate) {

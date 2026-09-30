@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.14-ui2';
+export const APP_VERSION = 'v0.5.15-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
