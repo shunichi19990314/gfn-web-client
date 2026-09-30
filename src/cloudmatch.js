@@ -526,6 +526,60 @@ export class SessionConflictError extends Error {
 
 // ---------- セッション情報抽出 ----------
 
+/**
+ * メディア接続エンドポイント(IP+ポート)の解決 —
+ * Electron cloudmatchSignaling.ts resolveMediaConnectionInfo の移植。
+ * 優先順位:
+ *   1. usage=2 (Primary media path, UDP)
+ *   2. usage=17 (Alternative media path)
+ *   3. usage=14 の最高ポート (Allianceフォールバック — シグナリングポートとメディアポートを区別)
+ * IPは .ip フィールド → resourcePath のホスト(rtsps://host:port 形式)の順で抽出。
+ * ポートは .port → resourcePath URL のポートの順。
+ * @returns {{ip: string, port: number, usage: number|null}|null}
+ */
+export function resolveMediaConnectionInfo(connections, serverIp = null) {
+  const extractIp = (conn) => {
+    const direct = firstString(conn?.ip);
+    if (direct) return direct;
+    if (typeof conn?.resourcePath === 'string') {
+      const host = hostFromResource(conn.resourcePath);
+      if (host) return host;
+    }
+    return null;
+  };
+  const extractPort = (conn) => {
+    const port = valueI64(conn?.port);
+    if (port && port > 0) return port;
+    if (typeof conn?.resourcePath === 'string') {
+      const match = conn.resourcePath.match(/:(\d+)(?:\/|$)/);
+      if (match) {
+        const parsed = Number.parseInt(match[1], 10);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+      }
+    }
+    return 0;
+  };
+
+  for (const usage of [2, 17]) {
+    const conn = (connections ?? []).find((c) => valueI64(c?.usage) === usage);
+    if (conn) {
+      const ip = extractIp(conn);
+      const port = extractPort(conn);
+      if (ip && port > 0) return { ip, port, usage };
+    }
+  }
+
+  const alliance = (connections ?? [])
+    .filter((c) => valueI64(c?.usage) === 14)
+    .sort((a, b) => extractPort(b) - extractPort(a));
+  for (const conn of alliance) {
+    const ip = extractIp(conn) ?? serverIp;
+    const port = extractPort(conn);
+    if (ip && port > 0) return { ip, port, usage: 14 };
+  }
+  return null;
+}
+
 /** cloudmatch.rs:994-1140 session_info の移植 */
 export function sessionInfo(payload, { fallbackBase, zone, fallbackAppId, deviceId }) {
   const session = payload?.session;
@@ -570,14 +624,11 @@ export function sessionInfo(payload, { fallbackBase, zone, fallbackAppId, device
     })
     .filter(Boolean);
 
-  const mediaConn = connections.find((c) => [2, 17].includes(valueI64(c?.usage)));
-  let mediaConnectionInfo = null;
-  if (mediaConn) {
-    const ip = firstString(mediaConn.ip) ??
-      (typeof mediaConn.resourcePath === 'string' ? hostFromResource(mediaConn.resourcePath) : null);
-    const port = valueI64(mediaConn.port);
-    if (ip && port && port > 0) mediaConnectionInfo = { ip, port, usage: valueI64(mediaConn.usage) };
-  }
+  // メディアエンドポイント解決 — Electron cloudmatchSignaling.ts resolveMediaConnectionInfo
+  // の完全移植(優先順位: usage=2 → usage=17 → usage=14の最高ポート)。
+  // usage 2/17 が Webメディアプレーン(公式Webクライアント向け)。usage=14 フォール
+  // バックは Alliance/rtsps 系で、stream.js 側の書き換え/注入は usage 2/17 のみ対象にする。
+  const mediaConnectionInfo = resolveMediaConnectionInfo(connections, serverIp);
 
   const monitor = session?.sessionRequestData?.clientRequestMonitorSettings?.[0] ?? {};
   const features = { ...(session?.sessionRequestData?.requestedStreamingFeatures ?? {}) };
@@ -739,8 +790,8 @@ export function resolveRequestedRegion(region, providerBase) {
  * 新しいキューリクエストの abandoned/競合を誘発するため、作成前に DELETE する。
  * 他デバイスのストリーミング中(status 2/3)セッションは絶対に触らない。
  */
-export async function cleanupStaleSessions({ bases, token, deviceHashId }) {
-  const headers = cloudmatchHeaders(token, deviceHashId, { includeOrigin: false });
+export async function cleanupStaleSessions({ bases, token, deviceHashId, cmProfile }) {
+  const headers = cloudmatchHeaders(token, deviceHashId, { includeOrigin: false, profile: cmProfile });
   const removed = [];
   for (const baseUrl of bases) {
     if (!baseUrl) continue;
@@ -772,7 +823,7 @@ export async function cleanupStaleSessions({ bases, token, deviceHashId }) {
  * セッション作成(cloudmatch.rs:57-155 create)
  * @returns {{info: object, base: URL, zone: string, clientId: string, cleanedUp: Array}}
  */
-export async function createSession({ appId, params = {}, settings = {}, token, deviceHashId, providerBase }) {
+export async function createSession({ appId, params = {}, settings = {}, token, deviceHashId, providerBase, cmProfile }) {
   if (!/^\d+$/.test(String(appId ?? ''))) {
     throw new UpstreamError('invalid_params', 'The selected game launch app ID must be numeric');
   }
@@ -785,13 +836,13 @@ export async function createSession({ appId, params = {}, settings = {}, token, 
   url.searchParams.set('keyboardLayout', keyboardLayout);
   url.searchParams.set('languageCode', language);
   const clientId = randomUUID(); // Electron: セッション単位で安定した clientId
-  const headers = cloudmatchHeaders(token, deviceHashId, { clientId, includeOrigin: true });
+  const headers = cloudmatchHeaders(token, deviceHashId, { clientId, includeOrigin: true, profile: cmProfile });
   const zone = params.zone ?? base.hostname;
 
   // 作成前の残留掃除(ベストエフォート): キュー残り/自デバイス旧セッションを DELETE
   const cleanupBases = [base.href];
   if (DEFAULT_STREAMING_URL !== base.href) cleanupBases.push(DEFAULT_STREAMING_URL);
-  const cleaned = await cleanupStaleSessions({ bases: cleanupBases, token, deviceHashId });
+  const cleaned = await cleanupStaleSessions({ bases: cleanupBases, token, deviceHashId, cmProfile });
 
   // CloudMatchは既存セッションがある場合、要求と異なるappIdのセッションを
   // 「静かに再利用」して返すことがある(2026-09-29実測: 103500271要求→102241311応答)。
@@ -849,7 +900,7 @@ export async function createSession({ appId, params = {}, settings = {}, token, 
  */
 export async function pollSession({ state, token, deviceHashId }) {
   if (!state?.sessionId) throw new UpstreamError('invalid_params', 'No active session');
-  const headers = cloudmatchHeaders(token, deviceHashId, { clientId: state.clientId, includeOrigin: false });
+  const headers = cloudmatchHeaders(token, deviceHashId, { clientId: state.clientId, includeOrigin: false, profile: state.cmProfile });
 
   const candidates = [];
   const push = (url) => {
@@ -955,7 +1006,7 @@ export async function claimSession({ sessionId, state, settings = {}, token, dev
   const requested = trustedCloudmatchBase(providerBase || DEFAULT_STREAMING_URL) ?? new URL(DEFAULT_STREAMING_URL);
   const lookupBase = (state?.pollBase && trustedCloudmatchBase(state.pollBase)) ??
     (state?.serverIp && trustedLearnedServerBase(state.serverIp)) ?? requested;
-  const headers = cloudmatchHeaders(token, deviceHashId, { clientId: state?.clientId, includeOrigin: true });
+  const headers = cloudmatchHeaders(token, deviceHashId, { clientId: state?.clientId, includeOrigin: true, profile: state?.cmProfile });
   const payload = await getWithRetry(new URL(`v2/session/${sessionId}`, lookupBase.href), headers, 'Session claim failed');
   const session = payload?.session;
   const initialStatus = valueI64(session?.status) ?? 0;
@@ -993,7 +1044,7 @@ export async function stopSession({ state, token, deviceHashId }) {
   if (!base) base = trustedCloudmatchBase(state.controlBase ?? DEFAULT_STREAMING_URL);
   if (!base) return { stopped: false };
   const url = new URL(`v2/session/${state.sessionId}`, base.href);
-  const result = await fetchJson(url, { method: 'DELETE', headers: cloudmatchHeaders(token, deviceHashId, { clientId: state.clientId, includeOrigin: false }) });
+  const result = await fetchJson(url, { method: 'DELETE', headers: cloudmatchHeaders(token, deviceHashId, { clientId: state.clientId, includeOrigin: false, profile: state.cmProfile }) });
   if (!(result.status >= 200 && result.status < 300) && result.status !== 404) {
     const description = result.payload?.requestStatus?.statusDescription;
     throw new UpstreamError('session_error', `Session stop failed (${result.status})${description ? `: ${description}` : ''}`);
@@ -1027,7 +1078,7 @@ export async function reportAd({ state, params, token, deviceHashId }) {
   const url = new URL(`v2/session/${state.sessionId}`, base.href);
   const result = await fetchJson(url, {
     method: 'PUT',
-    headers: cloudmatchHeaders(token, deviceHashId, { clientId: state.clientId, includeOrigin: false }),
+    headers: cloudmatchHeaders(token, deviceHashId, { clientId: state.clientId, includeOrigin: false, profile: state.cmProfile }),
     body: JSON.stringify({ action: 6, adUpdates: [update] }),
   });
   const payload = validateCloudmatchResponse('Session ad update failed', result.status, result.payload, {});

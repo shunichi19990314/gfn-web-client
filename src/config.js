@@ -5,6 +5,7 @@
 
 export const ENDPOINTS = {
   serviceUrls: 'https://pcs.geforcenow.com/v1/serviceUrls',
+  authorize: 'https://login.nvidia.com/authorize',
   deviceAuthorize: 'https://login.nvidia.com/device/authorize',
   token: 'https://login.nvidia.com/token',
   clientToken: 'https://login.nvidia.com/client_token',
@@ -22,6 +23,12 @@ export const DEFAULT_IDP_ID = 'PDiAhv2kJTFeQ7WOPqiQ2tRZ7lGhR2X11dXvM4TZSxg';
 
 // OAuth クライアント
 export const STEAM_DECK_CLIENT_ID = 'q61ddeJrVt7O90Nl-P-N7I36yctih4Ml6FyXLrb6j-U';
+// GFN-PC 公式デスクトップクライアントのOAuthクライアントID
+// (OpenNOW v0.5.5 auth/constants.ts CLIENT_ID — 認証コード+PKCEフロー専用。
+//  device flow は "Device flow is not allowed" で拒否されることを 2026-09-30 実測確認)
+export const GFN_PC_CLIENT_ID = 'ZU7sPN-miLujMD95LfOQ453IB0AtjM8sMyvgJ9wCXEQ';
+// GFN-PC クライアントが登録している localhost リダイレクトポート(constants.ts REDIRECT_PORTS)
+export const GFN_PC_REDIRECT_PORT = 2259;
 export const SCOPES = 'openid consent email tk_client age';
 export const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 export const CLIENT_TOKEN_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:client_token';
@@ -39,6 +46,14 @@ export const GFN_USER_AGENT =
 export const GFN_PLAY_ORIGIN = 'https://play.geforcenow.com';
 export const GFN_PLAY_REFERER = 'https://play.geforcenow.com/';
 export const NVIDIA_FILE_ORIGIN = 'https://nvfile';
+export const NVIDIA_FILE_REFERER = 'https://nvfile/';
+
+// GFN-PC 公式デスクトップクライアント(CEF)相当のUA・バージョン
+// (OpenNOW v0.5.5 clientHeaders.ts GFN_WINDOWS_USER_AGENT / GFN_CLIENT_VERSION。
+//  CloudMatch・NVSTシグナリングWS・PC認証で使用する)
+export const GFN_PC_CLIENT_VERSION = '2.0.80.173';
+export const GFN_PC_CEF_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 NVIDIACEFClient/HEAD/debb5919f6 GFN-PC/2.0.80.173';
 
 // トークンリフレッシュ窓(gfn.rs:30-31)
 export const TOKEN_REFRESH_WINDOW_MS = 10 * 60 * 1000;

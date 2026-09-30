@@ -90,6 +90,13 @@ export function extractIceCredentials(sdp) {
   };
 }
 
+/** サーバーofferから ice-ufrag を抽出 — 手動ICE候補注入(ice-liteサーバー)用に
+ *  usernameFragment として必要(Electron sdp/ice.ts extractIceUfragFromOffer) */
+export function extractIceUfragFromOffer(sdp) {
+  const match = String(sdp ?? '').match(/a=ice-ufrag:([^\r\n]+)/);
+  return match?.[1]?.trim() ?? '';
+}
+
 // ---- サーバーofferからのRI(入力)能力パース — webrtcClient.ts:186-236 ----
 
 export function parsePartialReliableThresholdMs(sdp) {

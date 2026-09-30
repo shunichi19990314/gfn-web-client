@@ -30,7 +30,7 @@ function ensureSweeper() {
 
 // ---- デバイスログイン試行 ----
 
-export function createAttempt(provider, deviceCode, expiresInSec) {
+export function createAttempt(provider, deviceCode, expiresInSec, extra = null) {
   ensureSweeper();
   const attemptId = randomUUID();
   attempts.set(attemptId, {
@@ -38,6 +38,7 @@ export function createAttempt(provider, deviceCode, expiresInSec) {
     deviceCode,
     expiresAt: Date.now() + (expiresInSec || 600) * 1000,
     session: null,
+    ...(extra ?? {}),
   });
   return attemptId;
 }

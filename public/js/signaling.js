@@ -104,7 +104,14 @@ export class NvstSignalingClient {
         }
         this.#emit({ type: 'disconnected', reason: event.reason || `code ${event.code}` });
       });
-      ws.addEventListener('message', (event) => this.#handleMessage(typeof event.data === 'string' ? event.data : ''));
+      ws.addEventListener('message', (event) => {
+        if (typeof event.data === 'string') {
+          this.#handleMessage(event.data);
+          return;
+        }
+        // バイナリフレーム: NVST JSONプロトコルでは想定外。静かに捨てず記録する(v0.5.17)
+        this.#emit({ type: 'log', message: `signaling: BINARY frame received (${event.data?.size ?? event.data?.byteLength ?? '?'} bytes) — not JSON protocol` });
+      });
     });
   }
 
@@ -113,7 +120,11 @@ export class NvstSignalingClient {
     try {
       parsed = JSON.parse(text);
     } catch {
-      return; // 非JSONパケットは無視
+      // 非JSONパケット: 静かに捨てず記録する(v0.5.17 — Electron signaling.ts 準拠)
+      if (text) {
+        this.#emit({ type: 'log', message: `signaling: non-JSON frame ignored: ${text.slice(0, 120)}` });
+      }
+      return;
     }
     if (parsed.peer_info) {
       if (typeof parsed.peer_info.id === 'number' && parsed.peer_info.name === this.#peerName) {

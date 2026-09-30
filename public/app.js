@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.16-ui2';
+export const APP_VERSION = 'v0.5.17-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -80,6 +80,7 @@ const state = {
   searchQuery: '',
   loginMode: 'qr', // 'qr' | 'code'
   loginAttempt: null, // { attemptId, deviceCode, intervalMs, expiresAt, timer, countdownTimer }
+  pcAttempt: null, // GFN-PC認証コード+PKCEログイン { attemptId }
   launchGame: null, // 起動対象のゲーム
   launchRetryCount: 0, // queue_abandoned等の自動再試行回数
   sessionGoneRetry: 0, // session_gone からの自動再作成回数(作成成功ごとにリセット、1セッションにつき最大1)
@@ -313,8 +314,82 @@ function cancelLogin(_reason) {
 
 function resetLoginUi() {
   $('login-pending').classList.add('hidden');
+  $('pending-pc')?.classList.add('hidden');
   $('login-idle').classList.remove('hidden');
   $('start-login-btn').disabled = false;
+  const pcBtn = $('pc-login-btn');
+  if (pcBtn) pcBtn.disabled = false;
+}
+
+// ---------- ログイン: GFN-PC 認証コード+PKCE(v0.5.17) ----------
+// 公式PCクライアント(GFN-PC)のクライアントIDで取得したトークンを使う。
+// Steam Deckデバイスフローのトークンでは CloudMatch が Webメディアエンドポイント
+// (usage 2/17)を返さずストリーミング不能だった(2026-09-30実測)。
+
+async function startPcLogin() {
+  const providerIdpId = $('provider-select').value || undefined;
+  $('pc-login-btn').disabled = true;
+  try {
+    const res = await api('/api/auth/pc/start', {
+      method: 'POST',
+      body: JSON.stringify({ providerIdpId }),
+    });
+    state.pcAttempt = { attemptId: res.attemptId };
+    $('login-idle').classList.add('hidden');
+    $('login-pending').classList.remove('hidden');
+    $('pending-qr').classList.add('hidden');
+    $('pending-code').classList.add('hidden');
+    $('pending-pc').classList.remove('hidden');
+    $('pc-reopen-link').href = res.authUrl;
+    setPcStatus('ログインページを新しいタブで開きました。NVIDIA IDでログインしてください。');
+    window.open(res.authUrl, '_blank', 'noopener');
+  } catch (error) {
+    showToast(`GFN-PCログイン開始に失敗: ${error.message}`);
+    $('pc-login-btn').disabled = false;
+  }
+}
+
+function setPcStatus(text, isError = false) {
+  const el = $('pc-status');
+  el.textContent = text;
+  el.classList.toggle('error', isError);
+}
+
+async function completePcLogin() {
+  const pasted = $('pc-redirect-url').value.trim();
+  if (!pasted) {
+    setPcStatus('localhost のURL(または code)を貼り付けてください。', true);
+    return;
+  }
+  if (!state.pcAttempt) {
+    setPcStatus('ログイン試行が期限切れです。やり直してください。', true);
+    return;
+  }
+  $('pc-complete-btn').disabled = true;
+  setPcStatus('トークン交換中…');
+  try {
+    const { session } = await api('/api/auth/pc/complete', {
+      method: 'POST',
+      body: JSON.stringify({ attemptId: state.pcAttempt.attemptId, redirectUrl: pasted }),
+    });
+    state.pcAttempt = null;
+    state.session = session;
+    $('pc-redirect-url').value = '';
+    setPcStatus('');
+    resetLoginUi();
+    await enterLibrary();
+  } catch (error) {
+    setPcStatus(`接続に失敗: ${error.message}`, true);
+  } finally {
+    $('pc-complete-btn').disabled = false;
+  }
+}
+
+function cancelPcLogin() {
+  state.pcAttempt = null;
+  $('pc-redirect-url').value = '';
+  setPcStatus('');
+  resetLoginUi();
 }
 
 // ---------- ログイン: トークンインポート ----------
@@ -366,7 +441,8 @@ function renderUserChip(session) {
   $('user-chip').classList.remove('hidden');
   $('user-name').textContent = session.user.displayName ?? session.user.email ?? 'User';
   const tier = session.user.membershipTier ?? '';
-  $('user-tier').textContent = session.imported ? `${tier} • インポート` : tier;
+  const profile = session.authProfile === 'gfn-pc' ? 'GFN-PC' : session.imported ? 'インポート' : null;
+  $('user-tier').textContent = profile ? `${tier} • ${profile}` : tier;
   const avatar = $('user-avatar');
   if (session.user.avatarUrl) {
     avatar.src = session.user.avatarUrl;
@@ -1431,6 +1507,9 @@ async function init() {
   $('copy-code-btn').addEventListener('click', () => copyText(state.loginAttempt?.userCode ?? ''));
   $('copy-code-btn2').addEventListener('click', () => copyText(state.loginAttempt?.userCode ?? ''));
   $('import-btn').addEventListener('click', importToken);
+  $('pc-login-btn')?.addEventListener('click', startPcLogin);
+  $('pc-complete-btn')?.addEventListener('click', completePcLogin);
+  $('pc-cancel-btn')?.addEventListener('click', cancelPcLogin);
   $('logout-btn').addEventListener('click', logout);
   $('load-more-btn').addEventListener('click', () => loadLibraryPage());
   $('search-input').addEventListener('input', (event) => {
@@ -1455,7 +1534,7 @@ async function init() {
       at: new Date().toISOString(),
       userAgent: navigator.userAgent,
       appVersion: APP_VERSION,
-      session: state.session ? { tier: state.session.user?.membershipTier, imported: state.session.imported } : null,
+      session: state.session ? { tier: state.session.user?.membershipTier, imported: state.session.imported, authProfile: state.session.authProfile ?? null } : null,
       lastLaunchError: state.lastLaunchError ?? null,
       sessionInfo: info,
       adRuntime: state.adRuntime ? { adId: state.adRuntime.adId, reportedFinish: state.adRuntime.reportedFinish, lastAction: state.adRuntime.lastAction, finished: [...(state.adRuntime.finishedIds ?? [])] } : null,

@@ -5,6 +5,7 @@ import {
   buildCandidatePortfolio,
   buildIceLiteHostCandidate,
   extractIceCredentials,
+  extractIceUfragFromOffer,
   extractRtspsPorts,
   extractMLinePorts,
   extractNegotiatedVideoCodec,
@@ -44,6 +45,7 @@ export class GfnStream {
   #remoteCandidateCount = 0;
   #offerHadCandidates = true;
   #offerMLinePorts = [];
+  #serverIceUfrag = '';
   #iceForensicsDone = false;
   #riCapabilities = {
     partialReliableThresholdMs: DEFAULT_PARTIAL_RELIABLE_THRESHOLD_MS,
@@ -238,6 +240,10 @@ export class GfnStream {
       this.log(`offer analysis: a=candidate:${aCand} bare-candidate:${bareCand} c=0.0.0.0:${cZero} ice-lite:${offerIsIceLite(offerSdp)}`);
       this.#offerHadCandidates = aCand + bareCand > 0;
       this.#offerMLinePorts = extractMLinePorts(offerSdp);
+      // 手動候補注入(ice-lite)用のサーバーufragを改変前の生offerから抽出
+      // (Electron webrtcClient.ts:3403 "Extract server's ice-ufrag BEFORE any modifications")
+      this.#serverIceUfrag = extractIceUfragFromOffer(offerSdp);
+      this.log(`server ICE ufrag: "${this.#serverIceUfrag}"`);
     }
     const rewriteIp = this.#remoteIceEndpoint?.ip ?? this.#session.serverIp ?? null;
     if (rewriteIp) {
@@ -344,14 +350,27 @@ export class GfnStream {
     const session = this.#session;
     const ips = [];
     const addIp = (ip) => { if (ip && !ips.includes(ip)) ips.push(ip); };
+    const ports = [];
+    const addPort = (port) => {
+      const p = Number(port);
+      if (Number.isFinite(p) && p > 0 && !ports.includes(p)) ports.push(p);
+    };
+    // 最優先: CloudMatch が明示した Webメディアエンドポイント(usage 2/17)。
+    // 2026年4-7月期の OpenNOW Electron はこのエンドポイントへの手動注入で
+    // ice-lite サーバーと接続していた(docs/streamer-investigation.md @ c9908f45:
+    // "GFN servers use ICE-lite and do not trickle candidates")
+    if (this.#remoteIceEndpoint?.ip && this.#remoteIceEndpoint?.port) {
+      addIp(extractPublicIp(this.#remoteIceEndpoint.ip));
+      addPort(this.#remoteIceEndpoint.port);
+      this.log(`ice-lite: prioritizing mediaConnectionInfo endpoint ${this.#remoteIceEndpoint.ip}:${this.#remoteIceEndpoint.port} (usage=${this.#remoteIceEndpoint.usage})`);
+    }
     addIp(extractPublicIp(session.serverIp ?? ''));
     for (const list of Object.values(session.resolvedIps ?? {})) {
       for (const ip of list ?? []) addIp(ip);
     }
-    const ports = [];
-    for (const port of this.#offerMLinePorts ?? []) if (!ports.includes(port)) ports.push(port);
+    for (const port of this.#offerMLinePorts ?? []) addPort(port);
     for (const port of extractRtspsPorts(session.rtspsEndpoints)) {
-      if (port !== 322 && !ports.includes(port)) ports.push(port); // 322はWS/RTSPのTCPポート
+      if (port !== 322) addPort(port); // 322はWS/RTSPのTCPポート
     }
     const portfolio = buildCandidatePortfolio(ips, ports);
     this.log(`ice-lite portfolio: ips=[${ips.join(', ')}] ports=[${ports.join(', ')}] → ${portfolio.length} candidates`);
@@ -362,7 +381,14 @@ export class GfnStream {
     let injected = 0;
     for (const entry of portfolio) {
       try {
-        await pc.addIceCandidate({ candidate: entry.candidate, sdpMid: '0', sdpMLineIndex: 0 });
+        // usernameFragment: サーバーofferのufrag(Electron 2026-04期の手動注入と同じ。
+        // BUNDLE済みofferでは通常不要だが、ice-lite相手では指定が安全)
+        await pc.addIceCandidate({
+          candidate: entry.candidate,
+          sdpMid: '0',
+          sdpMLineIndex: 0,
+          usernameFragment: this.#serverIceUfrag || undefined,
+        });
         injected += 1;
         this.#remoteCandidateCount += 1;
         this.log(`ice-lite: injected ${entry.ip}:${entry.port}`);

@@ -275,11 +275,31 @@ test('buildCandidatePortfolio: 空入力 → 空配列', async () => {
   assert.deepEqual(buildCandidatePortfolio(['1.2.3.4'], []), []);
 });
 
-// ---- CloudMatchヘッダ: browser プロファイル(v0.5.16) ----
+// ---- CloudMatchヘッダ: electron プロファイル(既定・v0.5.17) ----
 
-test('cloudmatchHeaders: browserプロファイル(既定)は BROWSER/WEBRTC', async () => {
+test('cloudmatchHeaders: electronプロファイル(既定)は NATIVE/NVIDIA-CLASSIC + WINDOWS + CEF UA', async () => {
   const { cloudmatchHeaders } = await import('../src/headers.js');
   const h = cloudmatchHeaders('tok', 'dev-1', { clientId: 'cid-1' });
+  assert.equal(h['nv-client-type'], 'NATIVE');
+  assert.equal(h['nv-client-streamer'], 'NVIDIA-CLASSIC');
+  assert.equal(h['nv-browser-type'], 'CHROME');
+  assert.equal(h['nv-client-version'], '2.0.80.173');
+  assert.equal(h['nv-device-os'], 'WINDOWS');
+  assert.equal(h['nv-device-type'], 'DESKTOP');
+  assert.equal(h['nv-device-make'], 'UNKNOWN');
+  assert.equal(h['nv-device-model'], 'UNKNOWN');
+  assert.equal(h['nv-client-id'], 'cid-1');
+  assert.equal(h['x-device-id'], 'dev-1');
+  assert.equal(h.Authorization, 'GFNJWT tok');
+  assert.equal(h.Origin, 'https://play.geforcenow.com');
+  assert.equal(h.Referer, 'https://play.geforcenow.com/');
+  assert.ok(h['User-Agent'].includes('NVIDIACEFClient') && h['User-Agent'].includes('GFN-PC/2.0.80.173'));
+  assert.equal(h['nv-client-platform-name'], undefined, 'electronプロファイルは nv-client-platform-name を送らない');
+});
+
+test('cloudmatchHeaders: browserプロファイルは BROWSER/WEBRTC(比較実験用)', async () => {
+  const { cloudmatchHeaders } = await import('../src/headers.js');
+  const h = cloudmatchHeaders('tok', 'dev-1', { clientId: 'cid-1', profile: 'browser' });
   assert.equal(h['nv-client-type'], 'BROWSER');
   assert.equal(h['nv-client-streamer'], 'WEBRTC');
   assert.equal(h['nv-client-platform-name'], 'browser');
@@ -290,10 +310,100 @@ test('cloudmatchHeaders: browserプロファイル(既定)は BROWSER/WEBRTC', a
   assert.ok(!h['User-Agent'].includes('NVIDIACEFClient'), 'browserプロファイルはCEF UAを使わない');
 });
 
-test('cloudmatchHeaders: nativeプロファイルは NATIVE/NVIDIA-CLASSIC(後方互換)', async () => {
+test('cloudmatchHeaders: nativeプロファイルは NATIVE/NVIDIA-CLASSIC + LINUX(後方互換)', async () => {
   const { cloudmatchHeaders } = await import('../src/headers.js');
   const h = cloudmatchHeaders('tok', 'dev-1', { profile: 'native', includeOrigin: false });
   assert.equal(h['nv-client-type'], 'NATIVE');
   assert.equal(h['nv-client-streamer'], 'NVIDIA-CLASSIC');
+  assert.equal(h['nv-device-os'], 'LINUX');
   assert.equal(h.Origin, undefined);
+});
+
+// ---- GFN-PC 認証コード+PKCEフロー(v0.5.17) ----
+
+test('generatePkce: S256 challenge が verifier と整合し、base64url 形式', async () => {
+  const { generatePkce } = await import('../src/nvidia.js');
+  const { createHash } = await import('node:crypto');
+  const { verifier, challenge } = generatePkce();
+  assert.ok(verifier.length >= 43 && verifier.length <= 86);
+  assert.ok(!/[+/=]/.test(verifier) && !/[+/=]/.test(challenge), 'base64url のみ');
+  const expected = createHash('sha256').update(verifier).digest('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  assert.equal(challenge, expected);
+});
+
+test('buildPcAuthUrl: GFN-PCクライアントIDとPKCE/localhostリダイレクトを含む', async () => {
+  const { buildPcAuthUrl } = await import('../src/nvidia.js');
+  const { authUrl, redirectUri } = buildPcAuthUrl({ challenge: 'CHALLENGE-X', deviceId: 'dev-9', idpId: 'IDP-1' });
+  const url = new URL(authUrl);
+  assert.equal(url.origin + url.pathname, 'https://login.nvidia.com/authorize');
+  assert.equal(url.searchParams.get('client_id'), 'ZU7sPN-miLujMD95LfOQ453IB0AtjM8sMyvgJ9wCXEQ');
+  assert.equal(url.searchParams.get('response_type'), 'code');
+  assert.equal(url.searchParams.get('redirect_uri'), 'http://localhost:2259');
+  assert.equal(redirectUri, 'http://localhost:2259');
+  assert.equal(url.searchParams.get('code_challenge'), 'CHALLENGE-X');
+  assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
+  assert.equal(url.searchParams.get('scope'), 'openid consent email tk_client age');
+  assert.equal(url.searchParams.get('idp_id'), 'IDP-1');
+  assert.equal(url.searchParams.get('device_id'), 'dev-9');
+  assert.equal(url.searchParams.get('prompt'), 'select_account');
+  assert.ok((url.searchParams.get('nonce') ?? '').length >= 16);
+});
+
+test('extractAuthCode: リダイレクトURL/生コード/エラーを解析', async () => {
+  const { extractAuthCode } = await import('../src/nvidia.js');
+  assert.deepEqual(
+    extractAuthCode('http://localhost:2259/?code=AbC-123_xyz&state=1'),
+    { code: 'AbC-123_xyz', error: null },
+  );
+  assert.deepEqual(extractAuthCode('  AbC-123_xyz  '), { code: 'AbC-123_xyz', error: null });
+  assert.deepEqual(
+    extractAuthCode('http://localhost:2259/?error=access_denied&code=X'),
+    { code: 'X', error: 'access_denied' },
+  );
+  assert.equal(extractAuthCode('').code, null);
+  assert.equal(extractAuthCode('').error, 'empty');
+  assert.equal(extractAuthCode('https://example.com/no-code-here').error, 'unrecognized');
+});
+
+// ---- mediaConnectionInfo 解決(Electron resolveMediaConnectionInfo 移植) ----
+
+test('resolveMediaConnectionInfo: usage=2 → usage=17 → usage=14最高ポート の優先順位', async () => {
+  const { resolveMediaConnectionInfo } = await import('../src/cloudmatch.js');
+  // usage=2 優先
+  assert.deepEqual(
+    resolveMediaConnectionInfo([
+      { ip: '10-0-0-1.example.net', port: 443, usage: 14 },
+      { ip: '10.0.0.2', port: 48000, usage: 2 },
+      { ip: '10.0.0.3', port: 48001, usage: 17 },
+    ]),
+    { ip: '10.0.0.2', port: 48000, usage: 2 },
+  );
+  // usage=17
+  assert.deepEqual(
+    resolveMediaConnectionInfo([
+      { ip: '10-0-0-1.example.net', port: 443, usage: 14 },
+      { ip: '10.0.0.3', port: 48001, usage: 17 },
+    ]),
+    { ip: '10.0.0.3', port: 48001, usage: 17 },
+  );
+  // usage=14 の最高ポート(Allianceフォールバック)— resourcePath からホスト/ポート抽出
+  assert.deepEqual(
+    resolveMediaConnectionInfo([
+      { ip: '10-0-0-1.example.net', port: 443, usage: 14, resourcePath: '/nvst/' },
+      { port: 0, usage: 14, resourcePath: 'rtsps://80-250-97-40.server.net:48322/session' },
+    ]),
+    { ip: '80-250-97-40.server.net', port: 48322, usage: 14 },
+  );
+  // 該当なし
+  assert.equal(resolveMediaConnectionInfo([]), null);
+  assert.equal(resolveMediaConnectionInfo([{ ip: '', port: 0, usage: 2 }], null), null);
+});
+
+// ---- offer ufrag 抽出(手動ICE注入用) ----
+
+test('extractIceUfragFromOffer: offerから ice-ufrag を抽出', async () => {
+  const { extractIceUfragFromOffer } = await import('../public/js/sdpUtils.js');
+  const offer = 'v=0\r\na=ice-lite\r\na=ice-ufrag:2c8badaa\r\na=ice-pwd:secret\r\n';
+  assert.equal(extractIceUfragFromOffer(offer), '2c8badaa');
+  assert.equal(extractIceUfragFromOffer('v=0\r\n'), '');
 });

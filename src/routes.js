@@ -22,13 +22,17 @@ import {
   stopSession,
 } from './cloudmatch.js';
 import {
+  buildPcAuthUrl,
   deviceAuthorize,
   deviceTokenPoll,
   ensureClientToken,
+  exchangePcCode,
+  extractAuthCode,
   fetchLibraryPage,
   fetchProviders,
   fetchServerInfo,
   fetchSubscription,
+  generatePkce,
   refreshTokens,
   resolveUser,
   sessionToken,
@@ -138,6 +142,7 @@ function publicSessionView(record) {
       hasClientToken: Boolean(record.tokens.clientToken),
     },
     imported: Boolean(record.imported),
+    authProfile: record.authProfile ?? (record.imported ? 'imported' : 'steam-deck'),
     deviceHashId: record.deviceHashId,
   };
 }
@@ -248,6 +253,72 @@ export async function registerRoutes(app) {
     return { ok: true };
   });
 
+  // ---- GFN-PC 認証コード+PKCEログイン(v0.5.17) ----
+  // Steam Deckデバイスフローのトークンでは CloudMatch が Webメディアエンドポイント
+  // (usage 2/17)をプロビジョンしない(2026-09-30実測)。WebRTCストリーミングが
+  // 動作していた OpenNOW Electron は GFN-PC クライアントIDのトークンを使っていた。
+
+  app.post('/api/auth/pc/start', async (request, reply) => {
+    if (!limit(request, reply, 'pc-start', { max: 10, windowMs: 60 * 60_000 })) return;
+    const { providerIdpId } = request.body ?? {};
+    const providers = await fetchProviders();
+    const provider =
+      providers.find((p) => p.idpId === providerIdpId) ??
+      providers[0] ?? { idpId: null, code: 'NVIDIA', displayName: 'NVIDIA', streamingServiceUrl: DEFAULT_STREAMING_URL, priority: 0 };
+    const { verifier, challenge } = generatePkce();
+    const deviceId = randomUUID();
+    const { authUrl, redirectUri } = buildPcAuthUrl({ challenge, deviceId, idpId: provider.idpId });
+    const attemptId = store.createAttempt({ ...provider, deviceId }, null, 600, {
+      pc: { verifier, redirectUri, deviceId },
+    });
+    reply.code(201).send({ attemptId, authUrl, redirectUri });
+  });
+
+  app.post('/api/auth/pc/complete', async (request, reply) => {
+    if (!limit(request, reply, 'pc-complete', { max: 30, windowMs: 60 * 60_000 })) return;
+    const { attemptId, redirectUrl } = request.body ?? {};
+    const attempt = typeof attemptId === 'string' ? store.getAttempt(attemptId) : null;
+    if (!attempt?.pc?.verifier) {
+      return reply.code(400).send({ error: 'invalid_params', message: 'PC login attempt expired. Start again.' });
+    }
+    const { code, error } = extractAuthCode(redirectUrl);
+    if (!code) {
+      return reply.code(400).send({
+        error: 'invalid_params',
+        message: error === 'empty'
+          ? 'Paste the full localhost URL (or code) from the address bar.'
+          : 'Could not find an authorization code in the pasted text.',
+      });
+    }
+    let tokens;
+    try {
+      tokens = await exchangePcCode({ code, verifier: attempt.pc.verifier, redirectUri: attempt.pc.redirectUri });
+    } catch (error2) {
+      request.log.warn({ err: error2?.message }, 'PC code exchange failed');
+      return reply.code(400).send({ error: 'exchange_failed', message: error2?.message ?? 'Token exchange failed' });
+    }
+    store.deleteAttempt(attemptId);
+    tokens = await ensureClientToken(tokens);
+    const user = await resolveUser(tokens);
+    const record = {
+      provider: attempt.provider,
+      tokens,
+      user: { ...user, membershipTier: 'FREE' },
+      deviceHashId: randomUUID(),
+      authProfile: 'gfn-pc',
+    };
+    const sid = store.saveSession(record);
+    reply.setCookie(COOKIE_NAME, sid, {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: app.productionCookieSecure,
+      maxAge: 24 * 60 * 60,
+    });
+    request.log.info({ userId: user.userId }, 'session created via GFN-PC authcode login');
+    return { session: publicSessionView(record) };
+  });
+
   // トークンインポート(公式 play.geforcenow.com のセッションJWTを貼り付け)
   app.post('/api/auth/token/import', async (request, reply) => {
     if (!limit(request, reply, 'token-import', { max: 10, windowMs: 60 * 60_000 })) return;
@@ -352,10 +423,12 @@ export async function registerRoutes(app) {
     const session = await requireSession(request, reply);
     if (!session) return;
     if (!limit(request, reply, 'session-start', { max: 20, windowMs: 60 * 1000 })) return;
-    const { appId, title, appLaunchMode, settings, region } = request.body ?? {};
+    const { appId, title, appLaunchMode, settings, region, cmProfile } = request.body ?? {};
     if (!/^\d+$/.test(String(appId ?? ''))) {
       return reply.code(400).send({ error: 'invalid_params', message: 'appId must be numeric (launchAppId)' });
     }
+    // CloudMatchヘッダプロファイル(electron既定 / browser / native — 比較実験用)
+    const profile = ['electron', 'browser', 'native'].includes(cmProfile) ? cmProfile : 'electron';
     const existing = store.getActiveSession(session.sid);
     if (existing) {
       // ローカルにアクティブ状態が残っていても、上流で既に失効している
@@ -393,6 +466,7 @@ export async function registerRoutes(app) {
       token: sessionToken(session.tokens),
       deviceHashId: session.deviceHashId,
       providerBase: resolveRequestedRegion(region, resolveProviderBase(session)),
+      cmProfile: profile,
     });
     store.setActiveSession(session.sid, {
       sessionId: info.sessionId,
@@ -404,6 +478,7 @@ export async function registerRoutes(app) {
       zone,
       appId: String(appId),
       clientId,
+      cmProfile: profile,
       keyboardLayout: info.keyboardLayout,
       resumePending: false,
       lastSessionAds: Array.isArray(info.adState?.sessionAds) && info.adState.sessionAds.length > 0 ? info.adState.sessionAds : null,

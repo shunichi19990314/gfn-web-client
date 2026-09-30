@@ -8,7 +8,7 @@
 // プロトコル処理はすべてブラウザ側 public/js/signaling.js が行う。
 // 出典: OpenNOW v0.5.5 opennow-stable/src/main/platforms/gfn/signaling.ts
 import { WebSocketServer, WebSocket as NodeWebSocket } from 'ws';
-import { GFN_USER_AGENT } from './config.js';
+import { GFN_PC_CEF_USER_AGENT } from './config.js';
 
 const COOKIE_NAME = 'gfnweb_sid';
 const UPSTREAM_PING_INTERVAL_MS = 25_000;
@@ -89,7 +89,8 @@ async function relay(clientWs, active, log) {
   const upstream = new NodeWebSocket(signInUrl, [subprotocol], {
     headers: {
       Origin: 'https://play.geforcenow.com',
-      'User-Agent': GFN_USER_AGENT,
+      // Electron GfnSignalingClient と同じ GFN-PC CEF(Windows)UA(clientHeaders.ts)
+      'User-Agent': GFN_PC_CEF_USER_AGENT,
     },
     handshakeTimeout: 15_000,
     perMessageDeflate: false,
@@ -132,8 +133,18 @@ async function relay(clientWs, active, log) {
     throw error;
   });
 
+  // フレーム観測ログ(v0.5.17): 静かな破棄を無くすための全フレーム記録。
+  // NVSTシグナリングのトラフィックは少ない(hb 5秒間隔 + peer_msg 数件)ので
+  // 全件ログで問題ない。バイナリフレームはサイズのみ記録。
+  const framePreview = (data, isBinary) => {
+    if (isBinary) return `<binary ${data?.length ?? 0} bytes>`;
+    const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
+    return text.length > 220 ? `${text.slice(0, 220)}…(${text.length})` : text;
+  };
+
   // ブラウザ → NVIDIA(透過)
   clientWs.on('message', (data, isBinary) => {
+    log.info?.({ sessionId: active.sessionId, dir: 'up', frame: framePreview(data, isBinary) }, 'NVST frame');
     if (!upstreamOpen) {
       if (queue.length < PRE_OPEN_QUEUE_LIMIT) queue.push(data);
       return;
@@ -147,6 +158,7 @@ async function relay(clientWs, active, log) {
 
   // NVIDIA → ブラウザ(透過)
   upstream.on('message', (data, isBinary) => {
+    log.info?.({ sessionId: active.sessionId, dir: 'down', frame: framePreview(data, isBinary) }, 'NVST frame');
     if (clientWs.readyState === clientWs.OPEN) {
       try { clientWs.send(data, { binary: isBinary }); } catch { closeAll(1011, 'client send failed'); }
     }

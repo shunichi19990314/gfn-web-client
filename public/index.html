@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/styles.css?v=21" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>" />
 </head>
-<body data-ui-version="v0.5.16-ui2">
+<body data-ui-version="v0.5.17-ui2">
   <!-- 古いキャッシュ検出バナー(app.jsがバージョン不一致を検出したら表示) -->
   <div id="stale-banner" class="stale-banner hidden">
     <strong>⚠ ブラウザが古いコードを実行しています。</strong>
@@ -45,11 +45,24 @@
           <div class="login-head">
             <h1>GeForce NOW にサインイン</h1>
             <p class="muted">
-              NVIDIA ID のデバイスフロー認証を使用します。パスワードはこのサーバーを一切通過しません。
+              ストリーミングには <strong>GFN-PCサインイン</strong>(公式PCクライアント互換の認証)を推奨します。
+              パスワードはこのサーバーを一切通過しません。
             </p>
           </div>
 
           <div id="login-idle">
+            <div class="field">
+              <label for="provider-select">ログインプロバイダ</label>
+              <select id="provider-select"></select>
+            </div>
+            <button id="pc-login-btn" class="btn primary btn-block" type="button">GFN-PC サインイン(推奨)</button>
+            <p class="muted tab-hint">
+              公式PCクライアント(GFN-PC)のクライアント資格情報でサインインします。
+              ストリーミング用メディアエンドポイント(usage 2/17)はこの方式のトークンにのみ
+              払い出されることを 2026-09-30 の調査で特定しました。
+              ログイン後、「このサイトにアクセスできません」ページのURLを貼り付ける手順があります。
+            </p>
+
             <div class="tabs" role="tablist">
               <button id="tab-qr" class="tab active" type="button" role="tab">
                 <span class="tab-icon">▣</span> QRコード
@@ -60,11 +73,7 @@
             </div>
             <p id="tab-hint" class="muted tab-hint"></p>
 
-            <div class="field">
-              <label for="provider-select">ログインプロバイダ</label>
-              <select id="provider-select"></select>
-            </div>
-            <button id="start-login-btn" class="btn primary btn-block" type="button">サインインを開始</button>
+            <button id="start-login-btn" class="btn btn-block" type="button">デバイスフローでサインイン(旧方式・ライブラリ表示のみ確認済み)</button>
 
             <details id="import-details">
               <summary>公式Webクライアントからトークンをインポート(上級者向け)</summary>
@@ -122,6 +131,24 @@
               <p class="muted">有効期限: <span id="expiry-countdown2">—</span></p>
               <p id="login-status2" class="status-line">承認待ち…</p>
               <button id="cancel-login-btn2" class="btn ghost" type="button">キャンセル</button>
+            </div>
+            <!-- GFN-PCモード(認証コード+PKCE・URL貼り付け方式) -->
+            <div id="pending-pc" class="code-wrap hidden">
+              <p><strong>GFN-PC サインイン手順</strong></p>
+              <ol class="muted pc-steps">
+                <li>新しいタブで開いた NVIDIA のページでログインする(既にログイン済みならアカウントを選択するだけ)。</li>
+                <li>ログイン後、<strong>「このサイトにアクセスできません」(localhost:2259)</strong> というエラーページが表示される — <strong>これは成功です</strong>。</li>
+                <li>そのページの<strong>アドレスバーのURLを丸ごとコピー</strong>する(<code>?code=…</code> が含まれています)。</li>
+                <li>下に貼り付けて「接続」を押す。</li>
+              </ol>
+              <textarea id="pc-redirect-url" rows="3" placeholder="http://localhost:2259/?code=…" spellcheck="false"></textarea>
+              <div class="code-actions">
+                <button id="pc-complete-btn" class="btn primary" type="button">接続</button>
+                <a id="pc-reopen-link" class="btn" href="#" target="_blank" rel="noreferrer">ログインページを開き直す ↗</a>
+                <button id="pc-cancel-btn" class="btn ghost" type="button">キャンセル</button>
+              </div>
+              <p id="pc-status" class="status-line"></p>
+              <p class="legal muted">code は1回限り・短時間で失効します。貼り付けたURLはこのサーバーでのトークン交換にのみ使用し、保存しません。</p>
             </div>
           </div>
         </div>

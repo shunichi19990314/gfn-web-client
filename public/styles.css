@@ -262,6 +262,9 @@ main { max-width: 1240px; margin: 0 auto; padding: 26px 22px 60px; min-height: c
 .import-body { padding: 15px 17px; }
 .import-steps { font-size: 13px; line-height: 2; margin-top: 0; }
 .import-steps code { background: #161c25; padding: 1px 6px; border-radius: 5px; font-size: 12px; font-family: var(--mono); }
+.pc-steps { font-size: 13px; line-height: 1.9; margin: 8px 0 12px; padding-left: 20px; }
+.pc-steps code { background: #161c25; padding: 1px 6px; border-radius: 5px; font-size: 12px; font-family: var(--mono); }
+#pc-redirect-url { width: 100%; font-family: var(--mono); font-size: 12px; }
 #import-token {
   width: 100%;
   background: #0a0e13;

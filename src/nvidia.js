@@ -2,16 +2,20 @@
 // OpenNOW (MIT) の Rustコア/旧Electron実装のJS移植:
 //   - parse_providers            → gfn.rs:1979
 //   - device authorize/token     → gfn.rs:472-650
+//   - GFN-PC authcode+PKCE       → v0.5.5 auth/oauthFlow.ts, tokenRefresh.ts
 //   - client_token/userinfo/JWT  → gfn.rs:1703-1793, 2589
 //   - serverInfo(vpcId/regions)  → gfn.rs:1462-1497, cloudmatch.rs:1575
 //   - library GraphQL + mapping  → gfn.rs:1147-1235, 2060-2193(app_to_game), 2207-2247(images)
 //   - MES subscription           → gfn.rs:1500-1600
+import { createHash, randomBytes } from 'node:crypto';
 import {
   CLIENT_TOKEN_GRANT_TYPE,
   DEFAULT_IDP_ID,
   DEFAULT_STREAMING_URL,
   DEVICE_GRANT_TYPE,
   ENDPOINTS,
+  GFN_PC_CLIENT_ID,
+  GFN_PC_REDIRECT_PORT,
   LCARS_CLIENT_ID,
   LIBRARY_FETCH_COUNT,
   LIBRARY_FILTERS,
@@ -26,6 +30,7 @@ import {
   gfnPlainHeaders,
   graphqlHeaders,
   lcarsHeaders,
+  nvidiaPcAuthHeaders,
   steamDeckAuthHeaders,
   userInfoHeaders,
 } from './headers.js';
@@ -192,11 +197,118 @@ export async function deviceTokenPoll(deviceCode) {
   };
 }
 
-/** GET /client_token(gfn.rs:1753-1793)。失敗しても致命ではない */
+// ---------- GFN-PC 認証コード+PKCEフロー(v0.5.17) ----------
+// 出典: OpenNOW v0.5.5 auth/oauthFlow.ts(generatePkce / buildAuthUrl /
+//       exchangeAuthorizationCode)+ tokenRefresh.ts。
+// 背景: WebRTCストリーミングが動作していた 2026年4-7月期の OpenNOW Electron は
+//       GFN-PCクライアントID(ZU7sPN…)のトークンで CloudMatch から Webメディア
+//       エンドポイント(usage 2/17)を受け取っていた。Steam Deckデバイスフローの
+//       トークンでは usages=[14] しか返らないことを 2026-09-30 に実測確認。
+//       GFN-PC IDはデバイスフロー不可("Device flow is not allowed")のため、
+//       認証コード+PKCE(redirect_uri=http://localhost:2259)を使う。
+//       WebアプリではローカルHTTPサーバーを立てられないため、リダイレクト失敗
+//       ページのURLから code をユーザーに貼り付けてもらう方式にする。
+
+/** PKCE verifier/challenge 生成(oauthFlow.ts generatePkce と同アルゴリズム) */
+export function generatePkce() {
+  const verifier = randomBytes(64)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '')
+    .slice(0, 86);
+  const challenge = createHash('sha256')
+    .update(verifier)
+    .digest('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+  return { verifier, challenge };
+}
+
+/** login.nvidia.com/authorize のURL構築(oauthFlow.ts buildAuthUrl 準拠) */
+export function buildPcAuthUrl({ challenge, deviceId, idpId = DEFAULT_IDP_ID, port = GFN_PC_REDIRECT_PORT }) {
+  const redirectUri = `http://localhost:${port}`;
+  const nonce = randomBytes(16).toString('hex');
+  const params = new URLSearchParams({
+    response_type: 'code',
+    device_id: deviceId,
+    scope: SCOPES,
+    client_id: GFN_PC_CLIENT_ID,
+    redirect_uri: redirectUri,
+    ui_locales: 'en_US',
+    nonce,
+    prompt: 'select_account',
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    idp_id: idpId ?? DEFAULT_IDP_ID,
+  });
+  return { authUrl: `${ENDPOINTS.authorize}?${params.toString()}`, redirectUri, nonce };
+}
+
+/**
+ * ユーザーが貼り付けた「リダイレクト失敗ページのURL」または code そのものから
+ * 認証コードを抽出する。
+ * @returns {{code: string|null, error: string|null}}
+ */
+export function extractAuthCode(pasted) {
+  const text = String(pasted ?? '').trim();
+  if (!text) return { code: null, error: 'empty' };
+  // URL形式: http://localhost:2259/?code=XXX&... (エラーページのアドレスバーをそのまま貼れる)
+  const urlMatch = text.match(/[?&]code=([^&#\s]+)/);
+  if (urlMatch) {
+    const errMatch = text.match(/[?&]error=([^&#\s]+)/);
+    return { code: decodeURIComponent(urlMatch[1]), error: errMatch ? decodeURIComponent(errMatch[1]) : null };
+  }
+  // 生コード形式(空白・引用符は除去)
+  const bare = text.replace(/^["']|["']$/g, '').replace(/\s+/g, '');
+  if (/^[A-Za-z0-9_.\-]{8,512}$/.test(bare)) return { code: bare, error: null };
+  return { code: null, error: 'unrecognized' };
+}
+
+/** POST /token(authorization_code grant)— oauthFlow.ts exchangeAuthorizationCode 準拠。
+ *  注意: ボディに client_id を含めない(Electron実装どおり。PKCE verifier で照合される) */
+export async function exchangePcCode({ code, verifier, redirectUri }) {
+  const result = await fetchJson(ENDPOINTS.token, {
+    method: 'POST',
+    headers: nvidiaPcAuthHeaders({
+      contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
+      includeReferer: true,
+    }),
+    body: formBody([
+      ['grant_type', 'authorization_code'],
+      ['code', code],
+      ['redirect_uri', redirectUri],
+      ['code_verifier', verifier],
+    ]),
+  });
+  if (!result.ok) {
+    const error = result.payload?.error ?? 'token_exchange_failed';
+    const description = result.payload?.error_description ?? error;
+    throw new UpstreamError('authentication_required', `PC login token exchange failed: ${description} (${result.status})`);
+  }
+  const payload = result.payload ?? {};
+  if (typeof payload.access_token !== 'string') {
+    throw new UpstreamError('upstream_error', 'PC login token response missing access_token');
+  }
+  return {
+    accessToken: payload.access_token,
+    refreshToken: payload.refresh_token ?? null,
+    idToken: payload.id_token ?? null,
+    clientToken: payload.client_token ?? null,
+    expiresAt: Date.now() + Number(payload.expires_in ?? 86_400) * 1000,
+    authClientId: GFN_PC_CLIENT_ID,
+  };
+}
+
+/** GET /client_token(gfn.rs:1753-1793)。失敗しても致命ではない
+ *  tokens.authClientId が GFN-PC の場合は Electron tokenRefresh.ts requestClientToken と
+ *  同じヘッダ(Origin https://nvfile + CEF UA)を使用する */
 export async function ensureClientToken(tokens) {
   try {
+    const pc = tokens.authClientId === GFN_PC_CLIENT_ID;
     const result = await fetchJson(ENDPOINTS.clientToken, {
-      headers: clientTokenHeaders(tokens.accessToken),
+      headers: clientTokenHeaders(tokens.accessToken, { pc }),
     });
     const payload = assertOk(result, 'Client token request failed');
     if (typeof payload?.client_token === 'string') {
@@ -212,9 +324,9 @@ export async function ensureClientToken(tokens) {
   return tokens;
 }
 
-/** GET /userinfo(gfn.rs:1703-1752) */
-export async function fetchUserInfo(accessToken) {
-  const result = await fetchJson(ENDPOINTS.userinfo, { headers: userInfoHeaders(accessToken) });
+/** GET /userinfo(gfn.rs:1703-1752)。pc=true なら GFN-PC クライアント相当のヘッダ */
+export async function fetchUserInfo(accessToken, { pc = false } = {}) {
+  const result = await fetchJson(ENDPOINTS.userinfo, { headers: userInfoHeaders(accessToken, { pc }) });
   const payload = assertOk(result, 'User info failed');
   if (typeof payload?.sub !== 'string') {
     throw new UpstreamError('upstream_error', 'User info response missing sub');
@@ -229,6 +341,7 @@ export async function fetchUserInfo(accessToken) {
 
 /** id_token優先→userinfoフォールバックでユーザー情報を確定 */
 export async function resolveUser(tokens) {
+  const pc = tokens.authClientId === GFN_PC_CLIENT_ID;
   const fromJwt =
     userFromJwt(tokens.idToken ?? '') ?? userFromJwt(tokens.accessToken);
   if (fromJwt && (fromJwt.email || fromJwt.avatarUrl)) {
@@ -239,7 +352,7 @@ export async function resolveUser(tokens) {
       avatarUrl: fromJwt.avatarUrl,
     };
   }
-  const info = await fetchUserInfo(tokens.accessToken);
+  const info = await fetchUserInfo(tokens.accessToken, { pc });
   return {
     userId: info.userId,
     email: info.email,
@@ -248,15 +361,18 @@ export async function resolveUser(tokens) {
   };
 }
 
-/** トークンリフレッシュ(client_token grant 優先 → refresh_token)(gfn.rs:1808-1870) */
+/** トークンリフレッシュ(client_token grant 優先 → refresh_token)(gfn.rs:1808-1870)
+ *  GFN-PC トークンは Electron tokenRefresh.ts と同じ nvfile ヘッダでリフレッシュする */
 export async function refreshTokens(tokens, userId) {
+  const pc = tokens.authClientId === GFN_PC_CLIENT_ID;
+  const authClientId = tokens.authClientId ?? STEAM_DECK_CLIENT_ID;
   const attempts = [];
   if (tokens.clientToken) {
     attempts.push(
       formBody([
         ['grant_type', CLIENT_TOKEN_GRANT_TYPE],
         ['client_token', tokens.clientToken],
-        ['client_id', tokens.authClientId ?? STEAM_DECK_CLIENT_ID],
+        ['client_id', authClientId],
         ['sub', userId],
       ]),
     );
@@ -266,7 +382,7 @@ export async function refreshTokens(tokens, userId) {
       formBody([
         ['grant_type', 'refresh_token'],
         ['refresh_token', tokens.refreshToken],
-        ['client_id', tokens.authClientId ?? STEAM_DECK_CLIENT_ID],
+        ['client_id', authClientId],
       ]),
     );
   }
@@ -274,7 +390,9 @@ export async function refreshTokens(tokens, userId) {
   for (const body of attempts) {
     const result = await fetchJson(ENDPOINTS.token, {
       method: 'POST',
-      headers: steamDeckAuthHeaders(),
+      headers: pc
+        ? nvidiaPcAuthHeaders({ contentType: 'application/x-www-form-urlencoded; charset=UTF-8' })
+        : steamDeckAuthHeaders(),
       body,
     });
     if (result.ok && typeof result.payload?.access_token === 'string') {
@@ -286,7 +404,7 @@ export async function refreshTokens(tokens, userId) {
         clientToken: payload.client_token ?? tokens.clientToken ?? null,
         clientTokenExpiresAt: tokens.clientTokenExpiresAt ?? null,
         expiresAt: Date.now() + Number(payload.expires_in ?? 86_400) * 1000,
-        authClientId: tokens.authClientId ?? STEAM_DECK_CLIENT_ID,
+        authClientId,
       };
     }
     lastError = result.payload?.error ?? `HTTP ${result.status}`;
