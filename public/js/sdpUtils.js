@@ -165,3 +165,37 @@ export function preferH264(pc) {
     return false;
   }
 }
+
+
+// ---- ice-lite サーバー向け手動候補注入(2026-09 現行インフラ対応) ----
+// 現行GFNのWeb offerは a=ice-lite を宣言しながら候補を1つも含まず、
+// trickleもしない(実測: remoteCandidates=0 でICEが new のまま → 16秒でサーバー切断)。
+// 旧Electron版は mediaConnectionInfo(usage 2/17)からip:portを得て候補を補正していたが、
+// 現行応答にはそれが無いため、serverIp + m=行のポートからhost候補を合成する。
+// (sdp/ice.ts の extractIceUfragFromOffer コメント「manual ICE candidate injection
+//  (ice-lite servers)」が示す技法。ufragはofferと一致させるためusernameFragmentは
+//  明示不要 — remoteDescriptionの値が既定で使われる)
+
+/** SDPが ice-lite 宣言を含むか */
+export function offerIsIceLite(sdp) {
+  return /^a=ice-lite\s*$/m.test(sdp);
+}
+
+/** 全 m= 行のポートを抽出(バンドル時は同一値) */
+export function extractMLinePorts(sdp) {
+  const ports = [];
+  for (const line of sdp.split(/\r?\n/)) {
+    const match = line.match(/^m=\S+\s+(\d+)/);
+    if (match) {
+      const port = Number.parseInt(match[1], 10);
+      if (Number.isFinite(port) && port > 0 && !ports.includes(port)) ports.push(port);
+    }
+  }
+  return ports;
+}
+
+/** ice-liteサーバーのhost候補を合成 */
+export function buildIceLiteHostCandidate(ip, port, foundation = 1) {
+  // 一般的なhost候補の優先度(2130706431)で合成。component 1 (rtcp-mux)
+  return `candidate:${foundation} 1 udp 2130706431 ${ip} ${port} typ host`;
+}

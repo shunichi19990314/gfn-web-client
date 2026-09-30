@@ -207,3 +207,45 @@ test('fixServerIp: a= なし candidate 行の 0.0.0.0 も置換', async () => {
   // c= 行は公式クライアント同様に変えない
   assert.match(fixed, /c=IN IP4 0\.0\.0\.0/);
 });
+
+// ---- ice-lite 候補合成(v0.5.14)— 実測offer(2026-09-30)をフィクスチャに ----
+
+const REAL_OFFER_FIXTURE = [
+  'v=0',
+  'o=- 4373647202393833435 2 IN IP4 127.0.0.1',
+  's=odrerir',
+  't=0 0',
+  'a=group:BUNDLE 0 1 2',
+  'a=ice-options:trickle',
+  'a=ice-lite',
+  'a=ice-ufrag:e9cb2af4',
+  'a=ice-pwd:418c3716-6c0b-4b49-96a7-25d5ab646da5',
+  'a=fingerprint:sha-256 96:64:F7:6F',
+  'a=setup:actpass',
+  'm=audio 47998 UDP/TLS/RTP/SAVPF 63 111',
+  'c=IN IP4 0.0.0.0',
+  'a=mid:0',
+  'm=video 47998 UDP/TLS/RTP/SAVPF 99 100',
+  'c=IN IP4 0.0.0.0',
+  'a=mid:1',
+  'm=application 47998 UDP/DTLS/SCTP webrtc-datachannel',
+  'c=IN IP4 0.0.0.0',
+  'a=mid:2',
+  '',
+].join('\r\n');
+
+test('offerIsIceLite / extractMLinePorts: 実測offerの解析', async () => {
+  const { offerIsIceLite, extractMLinePorts } = await import('../public/js/sdpUtils.js');
+  assert.equal(offerIsIceLite(REAL_OFFER_FIXTURE), true);
+  assert.deepEqual(extractMLinePorts(REAL_OFFER_FIXTURE), [47998]); // BUNDLE: 重複除去
+});
+
+test('buildIceLiteHostCandidate: 合成候補の形式', async () => {
+  const { buildIceLiteHostCandidate, extractPublicIp } = await import('../public/js/sdpUtils.js');
+  const ip = extractPublicIp('66-22-136-156.cloudmatchbeta.nvidiagrid.net');
+  assert.equal(ip, '66.22.136.156');
+  const cand = buildIceLiteHostCandidate(ip, 47998, 1);
+  assert.equal(cand, 'candidate:1 1 udp 2130706431 66.22.136.156 47998 typ host');
+  // RTCIceCandidateInit として parse 可能な形式であること
+  assert.match(cand, /^candidate:\d+ 1 udp \d+ \d+\.\d+\.\d+\.\d+ \d+ typ host$/);
+});

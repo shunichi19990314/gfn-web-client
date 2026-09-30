@@ -2,11 +2,14 @@
 // OpenNOW v0.5.5 (MIT) renderer/src/platforms/gfn/webrtcClient.ts の簡約移植
 // (映像受信+ハートビートまで。キー/マウス/ゲームパッド入力は Phase 2B)
 import {
+  buildIceLiteHostCandidate,
   extractIceCredentials,
+  extractMLinePorts,
   extractNegotiatedVideoCodec,
   extractPublicIp,
   fixServerIp,
   mungeAnswerSdp,
+  offerIsIceLite,
   parseRiInputCapabilities,
   preferH264,
   rewriteSdpIceCandidateEndpoints,
@@ -37,6 +40,8 @@ export class GfnStream {
   #remoteIceEndpoint = null;
   #localCandidateCount = 0;
   #remoteCandidateCount = 0;
+  #offerHadCandidates = true;
+  #offerMLinePorts = [];
   #riCapabilities = {
     partialReliableThresholdMs: DEFAULT_PARTIAL_RELIABLE_THRESHOLD_MS,
     hidDeviceMask: 0xffffffff,
@@ -219,7 +224,9 @@ export class GfnStream {
       const aCand = lines.filter((l) => l.startsWith('a=candidate:')).length;
       const bareCand = lines.filter((l) => /^candidate:/.test(l)).length;
       const cZero = lines.filter((l) => l.startsWith('c=IN IP4 0.0.0.0')).length;
-      this.log(`offer analysis: a=candidate:${aCand} bare-candidate:${bareCand} c=0.0.0.0:${cZero}`);
+      this.log(`offer analysis: a=candidate:${aCand} bare-candidate:${bareCand} c=0.0.0.0:${cZero} ice-lite:${offerIsIceLite(offerSdp)}`);
+      this.#offerHadCandidates = aCand + bareCand > 0;
+      this.#offerMLinePorts = extractMLinePorts(offerSdp);
     }
     const rewriteIp = this.#remoteIceEndpoint?.ip ?? this.#session.serverIp ?? null;
     if (rewriteIp) {
@@ -298,6 +305,35 @@ export class GfnStream {
     });
     this.#signaling.sendAnswer({ sdp: finalSdp, nvstSdp });
     this.log(`Sent SDP answer + nvstSdp (codec=${negotiatedCodec})`);
+
+    // ice-liteサーバーが候補を1つも提供しない場合(2026-09現行インフラの実測挙動)、
+    // serverIp + m=行ポートからhost候補を合成して注入する。
+    // これが無いとブラウザ側ICEはペアを形成できず "new" のままとなり、
+    // サーバーが約16秒でシグナリングを切断する。
+    if (!this.#offerHadCandidates && offerIsIceLite(processedOffer)) {
+      const serverIpRaw = this.#session.serverIp ?? null;
+      const serverIp = serverIpRaw ? extractPublicIp(serverIpRaw) : null;
+      const ports = this.#offerMLinePorts ?? [];
+      if (serverIp && ports.length > 0) {
+        let injected = 0;
+        for (const port of ports) {
+          const candidate = buildIceLiteHostCandidate(serverIp, port, injected + 1);
+          try {
+            await pc.addIceCandidate({ candidate, sdpMid: '0', sdpMLineIndex: 0 });
+            injected += 1;
+            this.#remoteCandidateCount += 1;
+            this.log(`ice-lite: injected synthesized host candidate → ${serverIp}:${port}`);
+          } catch (error) {
+            this.log(`ice-lite: inject FAILED for ${serverIp}:${port}: ${error?.message ?? error}`);
+          }
+        }
+        if (injected === 0) {
+          this.log('ice-lite: no candidates could be injected — ICE will not connect');
+        }
+      } else {
+        this.log(`ice-lite: cannot synthesize candidates (serverIp=${serverIpRaw} ports=${JSON.stringify(ports)})`);
+      }
+    }
     setTimeout(() => {
       if (this.#disposed) return;
       this.log(`post-answer check: remoteCandidates=${this.#remoteCandidateCount} localCandidates=${this.#localCandidateCount} ice=${pc.iceConnectionState} conn=${pc.connectionState}`);
