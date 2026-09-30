@@ -274,3 +274,26 @@ test('buildCandidatePortfolio: 空入力 → 空配列', async () => {
   assert.deepEqual(buildCandidatePortfolio([], [47998]), []);
   assert.deepEqual(buildCandidatePortfolio(['1.2.3.4'], []), []);
 });
+
+// ---- CloudMatchヘッダ: browser プロファイル(v0.5.16) ----
+
+test('cloudmatchHeaders: browserプロファイル(既定)は BROWSER/WEBRTC', async () => {
+  const { cloudmatchHeaders } = await import('../src/headers.js');
+  const h = cloudmatchHeaders('tok', 'dev-1', { clientId: 'cid-1' });
+  assert.equal(h['nv-client-type'], 'BROWSER');
+  assert.equal(h['nv-client-streamer'], 'WEBRTC');
+  assert.equal(h['nv-client-platform-name'], 'browser');
+  assert.equal(h['nv-browser-type'], 'CHROME');
+  assert.equal(h['nv-client-id'], 'cid-1');
+  assert.equal(h.Authorization, 'GFNJWT tok');
+  assert.equal(h.Origin, 'https://play.geforcenow.com');
+  assert.ok(!h['User-Agent'].includes('NVIDIACEFClient'), 'browserプロファイルはCEF UAを使わない');
+});
+
+test('cloudmatchHeaders: nativeプロファイルは NATIVE/NVIDIA-CLASSIC(後方互換)', async () => {
+  const { cloudmatchHeaders } = await import('../src/headers.js');
+  const h = cloudmatchHeaders('tok', 'dev-1', { profile: 'native', includeOrigin: false });
+  assert.equal(h['nv-client-type'], 'NATIVE');
+  assert.equal(h['nv-client-streamer'], 'NVIDIA-CLASSIC');
+  assert.equal(h.Origin, undefined);
+});

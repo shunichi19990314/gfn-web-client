@@ -104,15 +104,27 @@ export const GFN_WEB_CLIENT_VERSION = '2.0.80.173';
 export const GFN_WEB_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 NVIDIACEFClient/HEAD/debb5919f6 GFN-PC/2.0.80.173';
 
-export function cloudmatchHeaders(token, deviceId, { clientId, includeOrigin = true } = {}) {
+const BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+
+/**
+ * @param {'browser'|'native'} profile
+ *   browser: 公式Webクライアント相当(BROWSER/WEBRTC)。CloudMatchがWebメディア
+ *            エンドポイント(usage 2/17)とTURN(iceServerConfiguration)を
+ *            プロビジョンする条件である可能性が高いため v0.5.16 で既定に変更。
+ *   native:  旧Electron/Rust相当(NATIVE/NVIDIA-CLASSIC)。rtsps専用エンドポイント
+ *            しか返らないことを 2026-09-30 に実測で確認済み。
+ */
+export function cloudmatchHeaders(token, deviceId, { clientId, includeOrigin = true, profile = 'browser' } = {}) {
+  const browser = profile !== 'native';
   const headers = {
-    'User-Agent': GFN_WEB_USER_AGENT,
+    'User-Agent': browser ? BROWSER_USER_AGENT : GFN_WEB_USER_AGENT,
     Authorization: `GFNJWT ${token}`,
     'Content-Type': 'application/json',
     'nv-browser-type': 'CHROME',
     'nv-client-id': clientId ?? randomUUID(),
-    'nv-client-streamer': 'NVIDIA-CLASSIC',
-    'nv-client-type': 'NATIVE',
+    'nv-client-streamer': browser ? 'WEBRTC' : 'NVIDIA-CLASSIC',
+    'nv-client-type': browser ? 'BROWSER' : 'NATIVE',
     'nv-client-version': GFN_WEB_CLIENT_VERSION,
     // deviceIdentity.ts: サーバーホスト(Linux)のデスクトップ識別子。
     // clientPlatformName と同様に OpenNOW デスクトップ版は make/model=UNKNOWN を送信
@@ -122,6 +134,9 @@ export function cloudmatchHeaders(token, deviceId, { clientId, includeOrigin = t
     'nv-device-model': 'UNKNOWN',
     'x-device-id': deviceId,
   };
+  if (browser) {
+    headers['nv-client-platform-name'] = 'browser';
+  }
   if (includeOrigin !== false) {
     headers.Origin = GFN_PLAY_ORIGIN;
     headers.Referer = GFN_PLAY_REFERER;

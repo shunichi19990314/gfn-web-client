@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 
 // フロントエンドのバージョン。package.json / server /healthz と一致させる。
 // 表示中のUIとサーバーのバージョンが食い違ったら古いキャッシュ確定 → バナーで警告
-export const APP_VERSION = 'v0.5.15-ui2';
+export const APP_VERSION = 'v0.5.16-ui2';
 
 async function initVersionBadge() {
   const badge = $('version-badge');
@@ -872,6 +872,7 @@ async function launchGameInner(game, opts = {}) {
     `status=${info.status} (${info.phase}) / seatSetupStep=${info.seatSetupStep ?? '-'} / queue=${info.queuePosition ?? '-'} / ads=${info.adState?.isAdsRequired ?? false} / zone=${info.zone ?? '-'}`,
   );
   streamLog(`session created: ${JSON.stringify({ status: info.status, phase: info.phase, seat: info.seatSetupStep, queue: info.queuePosition, ads: info.adState?.isAdsRequired ?? false, serverIp: info.serverIp || null, signalingUrl: info.signalingUrl || null, zone: info.zone, appId: info.appId })}`);
+  streamLog(`create response shape: usages=[${(info.connectionUsages ?? []).join(',')}] mediaConn=${JSON.stringify(info.mediaConnectionInfo ?? null)} iceFromServer=${info.iceServersFromServer === true} resolvedIps=${JSON.stringify(info.resolvedIps ?? null)}`);
   if (info.reusedStaleSession) {
     streamLog(`WARNING: CloudMatch reused a stale session (appId ${info.appId} != requested ${game.launchAppId})`);
   }

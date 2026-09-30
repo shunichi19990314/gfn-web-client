@@ -193,7 +193,7 @@ export function regionalBases(payload) {
   return result;
 }
 
-export function normalizeIceServers(session) {
+export function normalizeIceServers(session, { withMeta = false } = {}) {
   const raw = Array.isArray(session?.iceServerConfiguration?.iceServers) ? session.iceServerConfiguration.iceServers : [];
   const servers = raw
     .map((entry) => {
@@ -202,11 +202,13 @@ export function normalizeIceServers(session) {
       return { urls, username: entry.username ?? undefined, credential: entry.credential ?? undefined };
     })
     .filter(Boolean);
+  const fromServer = servers.length > 0;
   if (servers.length === 0) {
     servers.push({ urls: [DEFAULT_STUN_SERVER] });
     servers.push({ urls: ['stun:stun.l.google.com:19302'] });
     servers.push({ urls: ['stun:stun1.l.google.com:19302'] });
   }
+  if (withMeta) return { servers, fromServer };
   return servers;
 }
 
@@ -649,6 +651,8 @@ export function sessionInfo(payload, { fallbackBase, zone, fallbackAppId, device
     connectionInfo: connections,
     rtspsEndpoints,
     iceServers: normalizeIceServers(session),
+    iceServersFromServer: normalizeIceServers(session, { withMeta: true }).fromServer,
+    connectionUsages: connections.map((c) => valueI64(c?.usage)),
     mediaConnectionInfo,
     negotiatedStreamProfile: negotiated,
     requestedStreamingFeatures: session?.sessionRequestData?.requestedStreamingFeatures ?? null,

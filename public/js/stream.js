@@ -124,9 +124,13 @@ export class GfnStream {
       this.#setStats({ connectionState: pc.connectionState });
       this.#callbacks.onState?.(pc.connectionState);
       if (['failed', 'closed', 'disconnected'].includes(pc.connectionState) && !this.#disposed) {
+        if (pc.connectionState === 'failed' && !this.#iceForensicsDone) {
+          this.#iceForensicsDone = true;
+          this.#dumpIceFailureStats();
+        }
         this.#callbacks.onError?.(
-          pc.iceConnectionState === 'failed'
-            ? 'ICE接続の確立に失敗(サーバー候補に到達できず)。TURN未提供/NAT制限/リージョン遠隔が疑われます。診断情報を確認し、別リージョンで再試行してください'
+          pc.iceConnectionState === 'failed' || pc.connectionState === 'failed'
+            ? 'ICE接続の確立に失敗(メディアエンドポイント未発見/UDP到達不可)。ペア別統計をログに出力しました'
             : `PeerConnection ${pc.connectionState}`,
         );
       }
